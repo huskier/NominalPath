@@ -1,0 +1,236 @@
+materials。。。。。。
+
+
+        // --- 装配/连接关系 ---
+        // connection dgsToBody    : MechanicalConnection
+        //     connect dgs.loadPort      to body.stageMount;
+        // connection bodyToNozzle : MechanicalConnection
+        //     connect body.nozzleMount  to nozzle.mountingPort;
+        // connection nozzleToTC   : DropletFlow
+        //     connect nozzle.outletPort to tc.inletPort;
+        
+        // ========================================================
+        // 8. 关键约束：DGS → Nozzle 的姿态传递关系
+        // ========================================================
+        // 假设已知传递函数 T，使得：
+        //   nozzle.currentPose = T( dgs.commandedPose,
+        //                            mountingOffset )
+        //
+        // 此处用约束表达式占位，具体形式由标定/几何确定。
+        // ========================================================
+        // constraint kinematicTransfer {
+        //     // 平动传递（含安装偏置）
+        //     nozzle.currentPose.position.x == 
+        //         f_x(dgs.commandedTx, dgs.commandedTy, dgs.commandedTz,
+        //             dgs.commandedRoll, dgs.commandedPitch, dgs.commandedYaw);
+        //     nozzle.currentPose.position.y == 
+        //         f_y(dgs.commandedTx, dgs.commandedTy, dgs.commandedTz,
+        //             dgs.commandedRoll, dgs.commandedPitch, dgs.commandedYaw);
+        //     nozzle.currentPose.position.z == 
+        //         f_z(dgs.commandedTx, dgs.commandedTy, dgs.commandedTz,
+        //             dgs.commandedRoll, dgs.commandedPitch, dgs.commandedYaw);
+        //     // 转动传递
+        //     nozzle.currentPose.roll  == g_roll (dgs.commandedRoll, dgs.commandedPitch, dgs.commandedYaw);
+        //     nozzle.currentPose.pitch == g_pitch(dgs.commandedRoll, dgs.commandedPitch, dgs.commandedYaw);
+        //     nozzle.currentPose.yaw   == g_yaw  (dgs.commandedRoll, dgs.commandedPitch, dgs.commandedYaw);
+        // }
+
+
+    // connection def MechanicalConnection;
+    // connection def DropletFlow;
+    
+    // ============================================================
+    // 9. 偏差场景（Variation）— 描述"有些时候"的情形
+    // ============================================================
+    
+    // // 场景A：理想 — 无任何偏差
+    // part def IdealCase :> DGSS {
+    //     constraint {
+    //         nozzle.positionDeviation.x == 0[mm];
+    //         nozzle.positionDeviation.y == 0[mm];
+    //         nozzle.positionDeviation.z == 0[mm];
+    //         nozzle.directionDeviation.thetaY == 0[deg];
+    //         nozzle.directionDeviation.thetaZ == 0[deg];
+    //     }
+    // }
+    
+    // // 场景B：仅方向偏离 — 喷嘴位置在X轴上，但喷射方向偏离-X
+    // part def DirectionDeviatedCase :> DGSS {
+    //     constraint {
+    //         nozzle.currentPose.position.y == 0[mm];
+    //         nozzle.currentPose.position.z == 0[mm];
+    //         (nozzle.directionDeviation.thetaY != 0[deg]) | 
+    //         (nozzle.directionDeviation.thetaZ != 0[deg]);
+    //     }
+    // }
+    
+    // // 场景C：位置+方向均偏离 — 喷嘴偏离X轴，且喷射方向也偏离
+    // part def FullyDeviatedCase :> DGSS {
+    //     constraint {
+    //         (nozzle.currentPose.position.y != 0[mm]) | 
+    //         (nozzle.currentPose.position.z != 0[mm]);
+    //         (nozzle.directionDeviation.thetaY != 0[deg]) | 
+    //         (nozzle.directionDeviation.thetaZ != 0[deg]);
+    //     }
+    // }
+
+
+    
+    // ============================================================
+    // 达成 IdealGoal 的反解过程
+    // ============================================================
+
+    // // --- 1. 期望的喷嘴位姿（IdealGoal 的几何充要条件）---
+    // attribute def DesiredNozzlePose :> Pose6DOF {
+    //     // 位置必须在 X 轴上（y=z=0），x 任意
+    //     attribute :>> position {
+    //         attribute :>> y = 0[mm];
+    //         attribute :>> z = 0[mm];
+    //         // x 由喷嘴安装位置决定，不强制
+    //     }
+    //     // 姿态：使出口方向沿 -X
+    //     attribute :>> pitch = 0[degree];   // 绕 Y：0 → 不偏向 Z 方向
+    //     attribute :>> yaw   = 0[degree];   // 绕 Z：0 → 不偏向 Y 方向
+    //     // roll 不影响出口方向（轴对称），可不约束
+    // }
+
+    // // --- 2. 反解动作：从期望喷嘴位姿求 DGS 指令 ---
+    // action def SolveDGSCommandForIdeal {
+    //     in  desiredPose : DesiredNozzlePose;
+    //     in  currentDeviation : AngularDeviation;   // 当前测得的喷嘴偏差
+    //     out command : DGSCommand;
+        
+    //     // 反解逻辑（占位，对应 kinematicTransfer 的逆运算）
+    //     // command = T⁻¹(desiredPose, mountingOffset, currentDeviation)
+    // }
+
+    // // --- 3. 可达性判断 ---
+    // constraint def IdealGoalReachable {
+    //     in solvedCommand : DGSCommand;
+    //     in dgsLimits : DGSTravelLimits;
+        
+    //     // 反解出的指令必须在位移台的行程极限内
+    //     abs(solvedCommand.tx)    <= dgsLimits.txMax;
+    //     abs(solvedCommand.ty)    <= dgsLimits.tyMax;
+    //     abs(solvedCommand.tz)    <= dgsLimits.tzMax;
+    //     abs(solvedCommand.roll)  <= dgsLimits.rollMax;
+    //     abs(solvedCommand.pitch) <= dgsLimits.pitchMax;
+    //     abs(solvedCommand.yaw)   <= dgsLimits.yawMax;
+    // }    
+
+    // attribute def DGSTravelLimits {
+    //     attribute txMax    : LengthValue;
+    //     attribute tyMax    : LengthValue;
+    //     attribute tzMax    : LengthValue;
+    //     attribute rollMax  : ScalarValues::Real;
+    //     attribute pitchMax : ScalarValues::Real;
+    //     attribute yawMax   : ScalarValues::Real;
+    // }
+    
+    // // --- 4. 容差化的 IdealGoal（工程版）---
+    // requirement def IdealGoalWithTolerance {
+    //     doc /* 工程上可验证的 IdealGoal：液滴轨迹与 X 轴的偏差在容差内 */
+    //     subject d : Droplet;
+    //     attribute positionTolerance : LengthValue = 0.01[mm];
+    //     attribute angleTolerance    : AngleValue  = 0.001[deg];
+        
+    //     require constraint {
+    //         // 起点近似在 X 轴上
+    //         sqrt(d.generationPosition.y ** 2 + 
+    //             d.generationPosition.z ** 2) < positionTolerance;
+    //         // 方向近似沿 -X
+    //         sqrt(d.velocityDirection.dy ** 2 + 
+    //             d.velocityDirection.dz ** 2) < sin(angleTolerance);
+    //         d.velocityDirection.dx < 0;
+    //     }
+    //     require collected : DropletCollectedByTC(d);
+    // }    
+
+    // // --- 5. 完整达成用例 ---
+    // use case def AchieveIdealGoal {
+    //     subject system : DGSS;
+        
+    //     objective {
+    //         doc /* 通过反解+下发 DGS 指令，使液滴满足 IdealGoalWithTolerance；
+    //             若反解结果超出 DGS 行程，则降级到 FallbackGoal */
+    //     }
+        
+    //     first start;
+        
+    //     // 步骤1：测量当前喷嘴姿态偏差
+    //     then action measure : MeasureNozzleDeviation {
+    //         out currentDeviation;
+    //     }
+        
+    //     // 步骤2：构造期望位姿（让出口在 X 轴上、沿 -X 喷射）
+    //     then action buildTarget : BuildDesiredPose {
+    //         out desiredPose : DesiredNozzlePose;
+    //     }
+        
+    //     // 步骤3：反解 DGS 指令
+    //     then action solve : SolveDGSCommandForIdeal {
+    //         in  desiredPose = buildTarget.desiredPose;
+    //         in  currentDeviation = measure.currentDeviation;
+    //         out command;
+    //     }
+        
+    //     // 步骤4：判断是否可达
+    //     then decide checkReachable {
+    //         if IdealGoalReachable(solve.command, system.dgs.limits) 
+    //             then applyIdeal;
+    //         else fallback;
+    //     }
+        
+    //     then action applyIdeal : ApplyDGSCommand {
+    //         in command = solve.command;
+    //     }
+        
+    //     then action emit : GenerateDroplet;
+    //     then action verify : VerifyIdealGoal;
+    //     then done;
+        
+    //     // 降级路径
+    //     action fallback : AchieveFallbackGoal;
+    // }    
+
+// // 1. 新增传感器组件
+//     part def PositionSensor {
+//         attribute detectedY : LengthValue;
+//         attribute detectedZ : LengthValue;
+//         attribute hasDetected : Boolean;
+//     }
+
+//     // 更新系统集成
+//     part def DGSS_ClosedLoop :> DGSS {
+//         part targetSensor : PositionSensor;
+//         // 绑定传感器位置到目标参考点
+//         // constraint { targetSensor.position == targetRef.position; }
+//     }
+
+    // // 2. 将用例改为闭环迭代模式
+    // use case def IterativeAlignment {
+    //     subject system : DGSS_ClosedLoop;
+        
+    //     first start;
+    //     then action initDGS; // 回零或移动到粗略估计位置
+        
+    //     // 进入闭环迭代
+    //     then loop alignLoop {
+    //         first action emit : GenerateDroplet;
+    //         then action measure : MeasureDropletImpact {
+    //             out errorY;
+    //             out errorZ;
+    //         }
+    //         then decide {
+    //             if (errorY < 0.01[mm] & errorZ < 0.01[mm]) then exitLoop;
+    //             else computeAdjustment;
+    //         }
+    //         then action computeAdjustment {
+    //             in errorY; in errorZ;
+    //             out deltaCommand : DGSCommand; // 基于误差计算增量
+    //         }
+    //         then action moveDGS { in deltaCommand; }
+    //         then alignLoop; // 再次循环
+    //     }
+    //     then done;
+    // }        
