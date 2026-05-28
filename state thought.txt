@@ -1,0 +1,54 @@
+
+
+•	优化建议： 引入 state def 来描述 DGSS 的运行状态。例如，定义 Initialization（系统复位与寻零）、Calibration（标定阶段）、ContinuousFiring（连续喷射阶段）以及 Fault（故障停机）。
+
+
+DGSS的几种状态：
+Initialization 【包括DGS回零，移动液滴到FDS的参考位置】
+Idle 【初始化后，未进入闭环锁定状态时的状态，或者，从闭环锁定状态退回到Idle状态】
+ClosedLoopLocking 【根据FDS的反馈，实时调整DGS，使得液滴锁定在FDS的参考位置，液滴进入ClosedLoopLocking的状态的前提是Y方向和Z方向稳定性达标】
+Fault 【故障状态】
+请基于此，为DGSS创建state machine
+
+
+液滴的稳定性：
+液滴的稳定性包含 【如何定义液滴稳定性？ 液滴喷射过程中，任意一段30s内的液滴稳定性3sigma的不稳定性小于15μm】
+纵向稳定性（X方向）：
+横向稳定性（Y方向和Z方向）：
+
+
+增加小视场组件的定义
+part def <FDS> 'Fine Detection System'{
+	part def illuminationComponent;
+	part def detectionComponent;
+}
+
+增加SafetyConstraint，当液滴不能被TC收集时，给出应对措施。
+
+增加“DGS调节分辨率需求”，平移的调节分辨率为1 μm。
+
+增加“DGS承重能力需求”，应该大于25 kg。
+
+增加“DGS工作中承压能力”，应该大于10^5 Pa。
+
+增加“DGS重量约束”，应该小于40 kg
+
+
+
+
+
+    // port def EnergyPort {
+    //     out item electricalEnergy : ElectricalEnergy;
+    //     attribute nominalVoltage :> ISQ::voltage;
+    //     attribute allowableVoltageVariation : ScalarValues::Real default 0.1;
+    //     ref assert constraint {
+    //     NumericalFunctions::abs(electricalEnergy.voltage - nominalVoltage)
+    //                 <= nominalVoltage * allowableVoltageVariation
+    //     }
+    // }
+    // item def ElectricalEnergy {
+    //     attribute voltage :> ISQ::voltage;
+    // }
+    // part def ElectricalOutlet {
+    //     port energyPort : EnergyPort;
+    // }  
