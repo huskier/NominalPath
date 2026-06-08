@@ -1,0 +1,42 @@
+
+
+
+    doc /* Version: 4.3
+         * Author: Simon
+         * Date: 2026-05-28
+         * Change history:
+         *   v1.0 (2026-05-28): 初始版本
+         *   v2.0 (2026-05-28): 增加 FDS 组件、DGSS 状态机、液滴稳定性定义、
+         *                      SafetyConstraint, DGS 调节分辨率/承重/承压/重量需求.
+         *   v3.0 (2026-05-28): 集成附录坐标变换 (三系初版, 部分约定为推测).
+         *   v4.0 (2026-05-28): 依据完整附录矩阵 (PF/机器/DGS 四系往返) 重写坐标变换,
+         *                      并经 verify_transforms.py 数值验证:
+         *                      - 显式建模四坐标系 DGSLCS/DGSCS/MCS/PFCS
+         *                      - 五环节链: DGSLCS-(命令6DOF)->DGSCS-(β=78°)->MCS-(α=28°)->PFCS
+         *                        实时控制运动在 DGSLCS→DGSCS; α/β 为 DGSCS 之上的固定安装关系
+         *                      - 用附录精确矩阵替换推测变换 (DGSCS↔MCS, MCS↔PFCS,
+         *                        DGSCS↔PFCS 及其逆), 全部互逆/复合一致
+         *                      - 修正标定约束为附录 T 分量公式 (L_op/L_os 在机器系,
+         *                        L_ps 在 PFCS, 经 Rx(α) 联系而非简单相减)
+         *   v4.1 (2026-05-28): 机器坐标系命名由 OriginFrame 改为 MCS (Machine Coordinate
+         *                      System); 同步更新枚举值、变换函数名 (DGSCS_to_MCS /
+         *                      MCS_to_PFCS) 及全部注释.
+         *   v4.2 (2026-05-28): 融入附录位移向量基础定义与角度正方向约定:
+         *                      - 新增 DisplacementVector 与 displacementVector (L_ab = b - a)
+         *                      - 新增 RotationSignConvention (右手定则角度正方向)
+         *                      - 标定结构中 L_op/L_os/L_ps 改用 DisplacementVector 表达,
+         *                        并由 PF/DGS 在 MCS 下的位置点按 L = P - o 派生 (附自洽约束);
+         *                        保留 Lopx.. 标量别名以向后兼容.
+         *   v4.3 (2026-05-28): 评审意见落地:
+         *                      - [意见7] Req-5 正名: workingPressureCapacity →
+         *                        differentialPressureCapacity; Req-5 由"工作环境压力上限"
+         *                        重写为"抗压差(耐放气/抽真空)能力", 并写明 ΔP 工况.
+         *                        名义工作环境实为高真空(~1e-5 Pa), 真实载荷是放气/抽真空
+         *                        瞬态下密封结构内外两侧约一个大气压的压差.
+         *                      - [意见2] DropletPassesTarget / DropletPassesMonitor 由
+         *                        distancePointToLine(点到直线) 改为基于 crossingPointAtX 的
+         *                        穿越点偏差判据, 与抛物线弹道模型自洽 (与 TC 命中判定统一).
+         *                      - [意见3] DGSS 运行状态由 String 改为枚举 DGSSOperatingState,
+         *                        并由状态机 entry 赋值驱动; Safety-1 约束同步改引枚举值.
+         *                      - Fault 状态注释"承压超限" → "压差超限", 与新命名统一.
+         */

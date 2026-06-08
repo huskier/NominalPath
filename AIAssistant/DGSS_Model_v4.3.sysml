@@ -4,7 +4,40 @@ package DGSS_Model {
          * Author: Simon
          * Date: 2026-05-28
          * Change history:
-         * Changelog.txt 中记录了每次修改的内容和原因。
+         *   v1.0 (2026-05-28): 初始版本
+         *   v2.0 (2026-05-28): 增加 FDS 组件、DGSS 状态机、液滴稳定性定义、
+         *                      SafetyConstraint, DGS 调节分辨率/承重/承压/重量需求.
+         *   v3.0 (2026-05-28): 集成附录坐标变换 (三系初版, 部分约定为推测).
+         *   v4.0 (2026-05-28): 依据完整附录矩阵 (PF/机器/DGS 四系往返) 重写坐标变换,
+         *                      并经 verify_transforms.py 数值验证:
+         *                      - 显式建模四坐标系 DGSLCS/DGSCS/MCS/PFCS
+         *                      - 五环节链: DGSLCS-(命令6DOF)->DGSCS-(β=78°)->MCS-(α=28°)->PFCS
+         *                        实时控制运动在 DGSLCS→DGSCS; α/β 为 DGSCS 之上的固定安装关系
+         *                      - 用附录精确矩阵替换推测变换 (DGSCS↔MCS, MCS↔PFCS,
+         *                        DGSCS↔PFCS 及其逆), 全部互逆/复合一致
+         *                      - 修正标定约束为附录 T 分量公式 (L_op/L_os 在机器系,
+         *                        L_ps 在 PFCS, 经 Rx(α) 联系而非简单相减)
+         *   v4.1 (2026-05-28): 机器坐标系命名由 OriginFrame 改为 MCS (Machine Coordinate
+         *                      System); 同步更新枚举值、变换函数名 (DGSCS_to_MCS /
+         *                      MCS_to_PFCS) 及全部注释.
+         *   v4.2 (2026-05-28): 融入附录位移向量基础定义与角度正方向约定:
+         *                      - 新增 DisplacementVector 与 displacementVector (L_ab = b - a)
+         *                      - 新增 RotationSignConvention (右手定则角度正方向)
+         *                      - 标定结构中 L_op/L_os/L_ps 改用 DisplacementVector 表达,
+         *                        并由 PF/DGS 在 MCS 下的位置点按 L = P - o 派生 (附自洽约束);
+         *                        保留 Lopx.. 标量别名以向后兼容.
+         *   v4.3 (2026-05-28): 评审意见落地:
+         *                      - [意见7] Req-5 正名: workingPressureCapacity →
+         *                        differentialPressureCapacity; Req-5 由"工作环境压力上限"
+         *                        重写为"抗压差(耐放气/抽真空)能力", 并写明 ΔP 工况.
+         *                        名义工作环境实为高真空(~1e-5 Pa), 真实载荷是放气/抽真空
+         *                        瞬态下密封结构内外两侧约一个大气压的压差.
+         *                      - [意见2] DropletPassesTarget / DropletPassesMonitor 由
+         *                        distancePointToLine(点到直线) 改为基于 crossingPointAtX 的
+         *                        穿越点偏差判据, 与抛物线弹道模型自洽 (与 TC 命中判定统一).
+         *                      - [意见3] DGSS 运行状态由 String 改为枚举 DGSSOperatingState,
+         *                        并由状态机 entry 赋值驱动; Safety-1 约束同步改引枚举值.
+         *                      - Fault 状态注释"承压超限" → "压差超限", 与新命名统一.
          */
 
     private import SI::*;
@@ -68,18 +101,23 @@ package DGSS_Model {
     // ============================================================
 
     enum def FrameKind {
-        DGSLCS_FRAME;         // DGS Local (DGS局部坐标系，l 系)
-        DGSCS_FRAME;          // DGS (机器系中的 s 系)
-        MCS_FRAME;            // 机器坐标系 (Machine Coordinate System, o 系)
-        PFCS_FRAME;           // Primary Focus
+        DGSLCS;         // DGS Local (DGS局部坐标系，l 系)
+        DGSCS;          // DGS (机器系中的 s 系)
+        MCS;            // 机器坐标系 (Machine Coordinate System, o 系)
+        PFCS;           // Primary Focus
     }
 
+    // ============================================================
+    // [意见3] DGSS 运行状态枚举 (替代原 String 表示)
+    //   与 DGSS 内的 state 机一一对应, 由状态机 entry 赋值驱动,
+    //   避免字符串魔法值与状态机两套表示手工同步导致漂移.
+    // ============================================================
     enum def DGSSOperatingState {
-        initialization;
-        idle;
-        closedLoopLocking;
-        fault;
-    }   
+        Initialization;
+        Idle;
+        ClosedLoopLocking;
+        Fault;
+    }
 
     attribute def Position3DInFrame :> Position3D {
         doc /* 带坐标系标签的 3D 位置, 明确区分同一数值在不同坐标系下的含义. */
@@ -199,7 +237,6 @@ package DGSS_Model {
         in ty       : LengthValue;
         in tz       : LengthValue;
         return : HomogeneousTransform;
-        //sin(alpha_Rz);
         // let ca=cos(alpha_Rz), sa=sin(alpha_Rz);
         // let cb=cos(beta_Ry),  sb=sin(beta_Ry);
         // let cg=cos(gamma_Rx), sg=sin(gamma_Rx);
@@ -326,21 +363,21 @@ package DGSS_Model {
             :>> x =    0.000000 [mm];
             :>> y =  -41.524524 [mm];
             :>> z = 1248.672688 [mm];
-            :>> coordinateFrame = FrameKind::MCS_FRAME;
+            :>> coordinateFrame = FrameKind::MCS;
         }
         // ---- 位移向量 L_os = S - o (在 MCS, o=原点) ----
         attribute L_os : DisplacementVector {
             :>> x =  916.328834 [mm];
             :>> y =  -41.524524 [mm];
             :>> z = 1341.435967 [mm];
-            :>> coordinateFrame = FrameKind::MCS_FRAME;
+            :>> coordinateFrame = FrameKind::MCS;
         }
         // ---- 位移向量 L_ps = S - P (在 PFCS) = DGSCS→PFCS 复合平移列 T ----
         attribute L_ps : DisplacementVector {
             :>> x =  916.328834 [mm];
             :>> y =   43.549721 [mm];
             :>> z =   81.905114 [mm];
-            :>> coordinateFrame = FrameKind::PFCS_FRAME;
+            :>> coordinateFrame = FrameKind::PFCS;
         }
 
         // 为向后兼容保留的标量别名 (供既有约束/函数引用)
@@ -387,7 +424,7 @@ package DGSS_Model {
         // return composeTransforms(T_ps, T_sl);
     }
 
-    // ---- 把 DGSLCS 下的点直接表达到 PFCS ----
+    // ---- 便捷点变换: 把 DGSLCS 下的点直接表达到 PFCS ----
     calc def transformPoint_DGSLCS_to_PFCS {
         in pointInDGSLCS : Position3D;
         in alpha_Rz : PlaneAngleValue;
@@ -420,7 +457,7 @@ package DGSS_Model {
        
     item def SpatialReferencePoint {
         attribute position : Position3D;
-        attribute coordinateFrame    : FrameKind default = FrameKind::PFCS_FRAME;   // 默认在 PFCS 下定义
+        attribute coordinateFrame    : FrameKind default = FrameKind::PFCS;   // 默认在 PFCS 下定义
     }
 
     item <PF> 'Primary Focus' : SpatialReferencePoint {
@@ -429,7 +466,7 @@ package DGSS_Model {
             :>> y = 0 [mm];
             :>> z = 0 [mm];
         }
-        :>> coordinateFrame = FrameKind::PFCS_FRAME;   // PF 是 PFCS 的原点
+        :>> coordinateFrame = FrameKind::PFCS;   // PF 是 PFCS 的原点
     }
     
     item monitorPosition : SpatialReferencePoint {
@@ -438,7 +475,7 @@ package DGSS_Model {
             :>> y = 0 [mm];
             :>> z = 0 [mm];
         }
-        :>> coordinateFrame = FrameKind::PFCS_FRAME;   // PF 是 PFCS 的原点
+        :>> coordinateFrame = FrameKind::PFCS;   // PF 是 PFCS 的原点
     }
     
     item nominalNozzlePosition : SpatialReferencePoint {
@@ -447,7 +484,7 @@ package DGSS_Model {
             :>> y = 0 [mm];
             :>> z = 0 [mm];
         }
-        :>> coordinateFrame = FrameKind::PFCS_FRAME;   // PF 是 PFCS 的原点
+        :>> coordinateFrame = FrameKind::PFCS;   // PF 是 PFCS 的原点
     }
 
     attribute def DropletStability {
@@ -556,9 +593,9 @@ package DGSS_Model {
         attribute translationResolution        : LengthValue;        // 平移轴最小可分辨步长
         attribute rotationResolution           : PlaneAngleValue;    // 旋转轴最小可分辨步长
 
-        // ---- 承重 / 承压 / 自身重量属性 ----
+        // ---- 承重 / 抗压差 / 自身重量属性 ----
         attribute loadCapacity                 : MassValue;          // 可承载负载质量 (kg)
-
+        // [意见7] 正名: 原 workingPressureCapacity (语义含混, 像"工作环境压力上限").
         //   真实载荷是放气/抽真空瞬态下密封结构内外两侧的压差 ΔP, 见 Req-5.
         attribute differentialPressureCapacity : PressureValue;      // 可承受的内外压差上限 ΔP (Pa)
         attribute stageOwnWeight               : MassValue;          // DGS 自身质量 (kg)
@@ -633,7 +670,6 @@ package DGSS_Model {
         requirement <'Req-1'> dropletAdjustableRangeRequirement {
             doc /* 在过 PF 点的 YZ 平面上, 以 PF 点为中心, 液滴落点应在
                  * 直径不小于 15 mm 的圆内任意可调. */
-            subject dgs : DGS;
             assume constraint regionGeometryMatch {
                 achievableAdjustableRegionCenter == requiredAdjustableRegionCenter and
                 achievableAdjustableRegionPlane  == requiredAdjustableRegionPlane  and
@@ -649,7 +685,6 @@ package DGSS_Model {
         // ============================================================
         requirement <'Req-2'> closedLoopBandwidthRequirement {
             doc /* DGS 各受控自由度闭环控制带宽 ≥ 5 Hz, 以 -3dB 幅值衰减为判定准则. */
-            subject dgs : DGS;
             require constraint bandwidthLowerBound {
                 closedLoopBandwidth >= 5 [Hz]
             }
@@ -663,7 +698,6 @@ package DGSS_Model {
                  *   即最小可控/可分辨步长 ≤ 1 μm.
                  *   测试方法: 在闭环控制下连续发送小步长指令, 用外部高分辨率
                  *   位移传感器 (干涉仪) 监测实际位移, 验证步长可重复分辨. */
-            subject dgs : DGS;
             attribute requiredTranslationResolution : LengthValue = 1 [um];
             require constraint translationResolutionBound {
                 translationResolution <= requiredTranslationResolution
@@ -676,7 +710,6 @@ package DGSS_Model {
         requirement <'Req-4'> loadCapacityRequirement {
             doc /* DGS 承重能力应不小于 25 kg, 用于支撑 Droplet Generator 本体
                  *   及附属管路/电缆. */
-            subject dgs : DGS;
             attribute requiredLoadCapacity : MassValue = 25 [kg];
             require constraint loadCapacityBound {
                 loadCapacity >= requiredLoadCapacity
@@ -685,6 +718,7 @@ package DGSS_Model {
 
         // ============================================================
         // ★ Req-5: DGS 抗压差 (耐放气 / 抽真空) 能力需求
+        //   [意见7] 由原"工作中承压能力需求"重写正名.
         // ============================================================
         requirement <'Req-5'> differentialPressureRequirement {
             doc /* DGS 结构可承受的内外压差 ΔP 应不小于 1×10^5 Pa (约一个大气压).
@@ -700,7 +734,6 @@ package DGSS_Model {
                  *
                  *   测试方法: 压差/检漏试验 (如氦质谱检漏 + 充压保持), 在最大 ΔP
                  *   下保持规定时长, 验证无永久变形且漏率在允许范围内. */
-            subject dgs : DGS;
             attribute requiredDifferentialPressure : PressureValue = 1.0e5 [Pa];
             require constraint differentialPressureBound {
                 differentialPressureCapacity >= requiredDifferentialPressure
@@ -712,7 +745,6 @@ package DGSS_Model {
         // ============================================================
         requirement <'Req-6'> stageWeightRequirement {
             doc /* DGS 自身重量应小于 40 kg, 以满足上级结构承载与装配限制. */
-            subject dgs : DGS;
             attribute maxStageWeight : MassValue = 40 [kg];
             require constraint stageWeightBound {
                 stageOwnWeight < maxStageWeight
@@ -1011,20 +1043,24 @@ package DGSS_Model {
         ref item envRef     = ambientEnvironment;
 
         // ---- 当前运行状态 (供外部观察) ----
+        //   [意见3] 由 String 改为枚举 DGSSOperatingState, 由状态机 entry 赋值驱动.
         attribute currentState : DGSSOperatingState;
         attribute faultFlag    : Boolean = false;
 
         // ============================================================
-        // ★ 新增: DGSS 状态机
+        // ★ DGSS 状态机
         //   States: Initialization → Idle → ClosedLoopLocking
         //   Any state → Fault (异常发生)
         //   Fault → Initialization (复位后重新初始化)
+        //   [意见3] 每个 state 在 entry 时同步刷新 currentState 枚举值.
         // ============================================================
         state DGSSStateMachine {
             entry; then Initialization;
 
             // ---------------- Initialization ----------------
             state Initialization {
+                entry assign currentState := DGSSOperatingState::Initialization;
+
                 entry action homeDGS;
                     doc /* DGS 回零: 所有平移/旋转轴执行 homing 序列,
                          *   确认编码器/限位开关状态. */
@@ -1050,6 +1086,8 @@ package DGSS_Model {
             state Idle {
                 doc /* 初始化完成或从 ClosedLoopLocking 退出后的待命状态.
                      *   液滴可能正在喷射, 但 DGS 控制环未参与闭环锁定. */
+                entry assign currentState := DGSSOperatingState::Idle;
+
                 entry action openControlLoop;
                     doc /* 释放闭环锁定 (若曾激活), DGS 维持当前姿态. */
                 do action monitorStability;
@@ -1070,6 +1108,8 @@ package DGSS_Model {
             state ClosedLoopLocking {
                 doc /* 利用 FDS 实时反馈, 闭环调整 DGS, 使液滴稳定锁定在
                      *   FDS 参考位置 (monitorPosition). */
+                entry assign currentState := DGSSOperatingState::ClosedLoopLocking;
+
                 entry action engageClosedLoop;
                     doc /* 接入 FDS → DGS 闭环路径, 开启位置闭环控制器. */
                 do action trackReference;
@@ -1094,6 +1134,8 @@ package DGSS_Model {
                 doc /* 故障状态: 检测到不可恢复异常 (运动学超限/传感器丢失/
                      *   液滴丢失/TC 收集失败超阈值/压差超限 等).
                      *   触发安全响应序列 (见 SafetyConstraint). */
+                entry assign currentState := DGSSOperatingState::Fault;
+
                 entry action raiseAlarm;
                 entry action executeSafetyResponse;
                     doc /* 见 dropletCannotBeCollectedSafetyResponse 定义的应对措施. */
@@ -1149,14 +1191,14 @@ package DGSS_Model {
         out collected : Boolean;
     }
 
-    // 注: distancePointToLine 适用于直线轨迹; 自 v4.3 起轨迹为抛物线
+    // [意见2] 注: distancePointToLine 适用于直线轨迹; 自 v4.3 起轨迹为抛物线
     //   (BallisticTrajectory), 穿越判据已统一改用 crossingPointAtX. 该占位函数
     //   保留以兼容历史引用, 不再被穿越类需求使用.
     calc def distancePointToLine {
         in point : Position3D;
         in line : BallisticTrajectory;
         return : LengthValue;
-    }   
+    }    
      
     requirement def DropletPassesTarget {
         doc /* 液滴轨迹必须经过 PF (0,0,0).
@@ -1319,8 +1361,9 @@ package DGSS_Model {
         subject system : DGSS;
 
         // 安全约束: 在检测到不可收集场景时, DGSS 必须进入 Fault 状态
+        //   [意见3] 状态比较改用枚举值 DGSSOperatingState::Fault.
         require constraint enterFaultOnUncollectable {
-            system.currentState == "Fault" or
+            system.currentState == DGSSOperatingState::Fault or
             system.faultFlag == false
             // 语义: 若 faultFlag 已经被置位 (检测到不可收集),
             //       则系统必须处于 Fault 状态.
