@@ -1,9 +1,26 @@
 package DGSS_Model {
 
-    doc /* Version: 5.1
+    doc /* Version: 5.2
          * Author: Simon  (变换层优化 by 协作迭代)
-         * Date: 2026-06-08
-         * Change history (见 ChangeLog.txt):
+         * Date: 2026-06-10
+         * Change history (见 ChangeLog.txt). v5.2 修订摘要:
+         *   FIX④ [H] 运行期可变量由绑定 `=` 改为初值 `:=` (uncollectableDetected /
+         *            lastDropletMissedTC / resetCommand / hasCollected),
+         *            消除 "绑定恒假 → faultFlag 恒假 → Fault 不可达" 的回归.
+         *   FIX⑤ [H] 仅含 if 守卫的迁移改为 accept when 变化触发
+         *            (源状态含无界 do 动作时, 守卫式完成迁移永无评估时机).
+         *   FIX⑥ [M] DGSS 状态机改为 exhibit state, 确保由 DGSS 实例履行.
+         *   FIX⑦ [M] DG.weight 由非法重定义 `:>> ISQ::mass` 改为 `: MassValue`.
+         *   FIX⑧ [M] do 动作内的故障锁存由单次 assign 改为 loop + accept when
+         *            变化事件驱动, 实现真正的"持续锁存"语义.
+         *   FIX⑨ [M] Req-1..6 / Req-FDS-1 提升至包级, 约束统一经 subject 引用,
+         *            并在 DGSS 中以 satisfy 建立需求-主体绑定与追溯.
+         *   FIX⑩ [M] translationConsistency 由精确 `==` 改为 0.1 µm 容差形式
+         *            (标定字面量第 6 位小数存在 ~0.6 nm 舍入, 精确相等会判 false).
+         *   其余: pointInsideTCAperture / getIdealHitLocalZ 落地为可求值表达式并
+         *         提升至包级; 液滴/指令交互由裸 connect 升级为 flow; use case 中
+         *         doc 移入对应 action 体内 (原挂错宿主); 删除冗余 `== true`;
+         *         micrometer → micrometre 拼写统一; 修正两处复制错误注释.
          */
 
     private import SI::*;
@@ -15,7 +32,9 @@ package DGSS_Model {
     private import VectorValues::ThreeVectorValue;
     private import NumericalFunctions::*;
 
-    attribute <um> micrometer : LengthUnit = micro * metre;
+    // [M] 若导入的 SI 库已声明 micrometre/<um>, 本地声明将按名称遮蔽之 (合法);
+    //     请在工具中确认无歧义告警.
+    attribute <um> micrometre : LengthUnit = micro * metre;
   
     attribute def Position3D {
         attribute x : LengthValue;
@@ -478,10 +497,12 @@ package DGSS_Model {
         }
 
         // ---- 标定一致性 (cos/sin 消量纲) ----  [H]
+        // ★ FIX⑩: 标定字面量按 6 位小数手填, L_ps.y 精确值 ≈ 43.549722 (差 ~0.6 nm),
+        //   精确 `==` 会因舍入判 false. 改为 0.1 µm 容差 (远高于舍入、远低于物理意义).
         assert constraint translationConsistency {
-            Lpsx == (Losx - Lopx) and
-            Lpsy == (Losy - Lopy) * cos(alpha_install/(1 [radian])) + (Losz - Lopz) * sin(alpha_install/(1 [radian])) and
-            Lpsz == (Lopy - Losy) * sin(alpha_install/(1 [radian])) + (Losz - Lopz) * cos(alpha_install/(1 [radian]))
+            NumericalFunctions::abs( Lpsx - (Losx - Lopx) ) <= 1.0e-4 [mm] and
+            NumericalFunctions::abs( Lpsy - ((Losy - Lopy) * cos(alpha_install/(1 [radian])) + (Losz - Lopz) * sin(alpha_install/(1 [radian]))) ) <= 1.0e-4 [mm] and
+            NumericalFunctions::abs( Lpsz - ((Lopy - Losy) * sin(alpha_install/(1 [radian])) + (Losz - Lopz) * cos(alpha_install/(1 [radian]))) ) <= 1.0e-4 [mm]
         }
     }
 
@@ -607,7 +628,7 @@ package DGSS_Model {
             :>> y = 0 [mm];
             :>> z = 0 [mm];
         }
-        :>> coordinateFrame = FrameKind::PFCS_FRAME;   // PF 是 PFCS 的原点
+        :>> coordinateFrame = FrameKind::PFCS_FRAME;   // FDS 监测参考点, 在 PFCS 下定义
     }
     
     item nominalNozzlePosition : SpatialReferencePoint {
@@ -616,7 +637,7 @@ package DGSS_Model {
             :>> y = 0 [mm];
             :>> z = 0 [mm];
         }
-        :>> coordinateFrame = FrameKind::PFCS_FRAME;   // PF 是 PFCS 的原点
+        :>> coordinateFrame = FrameKind::PFCS_FRAME;   // 喷嘴出口标称位置, 在 PFCS 下定义
     }
 
     attribute def DropletStability {
@@ -686,7 +707,8 @@ package DGSS_Model {
         port nozzleMount : MechanicalMountPort;
         port stageMount  : MechanicalMountPort;
 
-        attribute weight :>> ISQ::mass;
+        // ★ FIX⑦: 原 `:>> ISQ::mass` 为非法重定义 (DG 并不继承 ISQ::mass).
+        attribute weight : MassValue;
     }
     
     part def <DGS> 'Droplet Generator Stage' {
@@ -796,101 +818,100 @@ package DGSS_Model {
             reachableWorkspace(
                 commandedTx, commandedTy, commandedTz,
                 commandedRoll, commandedPitch, commandedYaw
-            ) == true
+            )
         }
         
         // ============================================================
-        // Req-1: 可调区域覆盖
+        // ★ FIX⑨: 原嵌于此处的 Req-1 ~ Req-6 已提升至包级 (见 DGS 定义之后),
+        //   约束统一经 subject 引用, 并在 DGSS 中以 satisfy 绑定主体.
         // ============================================================
-        requirement <'Req-1'> dropletAdjustableRangeRequirement {
-            doc /* 在过 PF 点的 YZ 平面上, 以 PF 点为中心, 液滴落点应在
-                 * 直径不小于 15 mm 的圆内任意可调. */
-            subject dgs : DGS;
-            assume constraint regionGeometryMatch {
-                achievableAdjustableRegionCenter == requiredAdjustableRegionCenter and
-                achievableAdjustableRegionPlane  == requiredAdjustableRegionPlane  and
-                achievableAdjustableRegionShape  == requiredAdjustableRegionShape
-            }
-            require constraint diameterCoverage {
-                achievableAdjustableRegionDiameter >= requiredAdjustableRegionDiameter
-            }
-        }
-
-        // ============================================================
-        // Req-2: 闭环带宽
-        // ============================================================
-        requirement <'Req-2'> closedLoopBandwidthRequirement {
-            doc /* DGS 各受控自由度闭环控制带宽 ≥ 5 Hz, 以 -3dB 幅值衰减为判定准则. */
-            subject dgs : DGS;
-            require constraint bandwidthLowerBound {
-                closedLoopBandwidth >= 5 [Hz]
-            }
-        }
-
-        // ============================================================
-        // ★ Req-3: DGS 调节分辨率需求
-        // ============================================================
-        requirement <'Req-3'> adjustmentResolutionRequirement {
-            doc /* DGS 平移自由度 (Tx, Ty, Tz) 的调节分辨率应不大于 1 μm,
-                 *   即最小可控/可分辨步长 ≤ 1 μm.
-                 *   测试方法: 在闭环控制下连续发送小步长指令, 用外部高分辨率
-                 *   位移传感器 (干涉仪) 监测实际位移, 验证步长可重复分辨. */
-            subject dgs : DGS;
-            attribute requiredTranslationResolution : LengthValue = 1 [um];
-            require constraint translationResolutionBound {
-                translationResolution <= requiredTranslationResolution
-            }
-        }
-
-        // ============================================================
-        // ★ Req-4: DGS 承重能力需求
-        // ============================================================
-        requirement <'Req-4'> loadCapacityRequirement {
-            doc /* DGS 承重能力应不小于 25 kg, 用于支撑 Droplet Generator 本体
-                 *   及附属管路/电缆. */
-            subject dgs : DGS;
-            attribute requiredLoadCapacity : MassValue = 25 [kg];
-            require constraint loadCapacityBound {
-                loadCapacity >= requiredLoadCapacity
-            }
-        }
-
-        // ============================================================
-        // ★ Req-5: DGS 抗压差 (耐放气 / 抽真空) 能力需求
-        // ============================================================
-        requirement <'Req-5'> differentialPressureRequirement {
-            doc /* DGS 结构可承受的内外压差 ΔP 应不小于 1×10^5 Pa (约一个大气压).
-                 *
-                 *   语义澄清: DGS 的名义工作环境是高真空 (见 ambientEnvironment,
-                 *   约 1×10^-5 Pa). 本需求并非"工作环境绝对压力上限", 而是结构在
-                 *   以下瞬态工况下两侧出现的压差承受能力:
-                 *     - 放气 (vent):       舱体由高真空回充至大气 (~1×10^5 Pa);
-                 *     - 抽真空 (pump-down): 舱体由大气抽降至高真空;
-                 *   上述过程中, DGS 的密封面 / 夹层 / 波纹管 / 法兰 / 焊缝 两侧可能
-                 *   承受接近一个大气压的压差, 结构不得发生屈服、永久变形或泄漏.
-                 *   定义 ΔP = |p_inside − p_outside|, 取全工况包络的最大值.
-                 *
-                 *   测试方法: 压差/检漏试验 (如氦质谱检漏 + 充压保持), 在最大 ΔP
-                 *   下保持规定时长, 验证无永久变形且漏率在允许范围内. */
-            subject dgs : DGS;
-            attribute requiredDifferentialPressure : PressureValue = 1.0e5 [Pa];
-            require constraint differentialPressureBound {
-                differentialPressureCapacity >= requiredDifferentialPressure
-            }
-        }
-
-        // ============================================================
-        // ★ Req-6: DGS 自身重量约束
-        // ============================================================
-        requirement <'Req-6'> stageWeightRequirement {
-            doc /* DGS 自身重量应小于 40 kg, 以满足上级结构承载与装配限制. */
-            subject dgs : DGS;
-            attribute maxStageWeight : MassValue = 40 [kg];
-            require constraint stageWeightBound {
-                stageOwnWeight < maxStageWeight
-            }
-        }
     }    
+
+    // ============================================================
+    // ★ FIX⑨: DGS 性能/结构需求 (包级; 约束一律经 subject `dgs.` 引用,
+    //   消除 v5.1 中 "subject 形同虚设、约束按词法直引外围特征" 的问题;
+    //   主体绑定见 DGSS 中的 satisfy 声明)
+    // ============================================================
+
+    // ---- Req-1: 可调区域覆盖 ----
+    requirement <'Req-1'> dropletAdjustableRangeRequirement {
+        doc /* 在过 PF 点的 YZ 平面上, 以 PF 点为中心, 液滴落点应在
+             * 直径不小于 15 mm 的圆内任意可调. */
+        subject dgs : DGS;
+        assume constraint regionGeometryMatch {
+            dgs.achievableAdjustableRegionCenter == dgs.requiredAdjustableRegionCenter and
+            dgs.achievableAdjustableRegionPlane  == dgs.requiredAdjustableRegionPlane  and
+            dgs.achievableAdjustableRegionShape  == dgs.requiredAdjustableRegionShape
+        }
+        require constraint diameterCoverage {
+            dgs.achievableAdjustableRegionDiameter >= dgs.requiredAdjustableRegionDiameter
+        }
+    }
+
+    // ---- Req-2: 闭环带宽 ----
+    requirement <'Req-2'> closedLoopBandwidthRequirement {
+        doc /* DGS 各受控自由度闭环控制带宽 ≥ 5 Hz, 以 -3dB 幅值衰减为判定准则. */
+        subject dgs : DGS;
+        require constraint bandwidthLowerBound {
+            dgs.closedLoopBandwidth >= 5 [Hz]
+        }
+    }
+
+    // ---- Req-3: DGS 调节分辨率需求 ----
+    requirement <'Req-3'> adjustmentResolutionRequirement {
+        doc /* DGS 平移自由度 (Tx, Ty, Tz) 的调节分辨率应不大于 1 μm,
+             *   即最小可控/可分辨步长 ≤ 1 μm.
+             *   测试方法: 在闭环控制下连续发送小步长指令, 用外部高分辨率
+             *   位移传感器 (干涉仪) 监测实际位移, 验证步长可重复分辨. */
+        subject dgs : DGS;
+        attribute requiredTranslationResolution : LengthValue = 1 [um];
+        require constraint translationResolutionBound {
+            dgs.translationResolution <= requiredTranslationResolution
+        }
+    }
+
+    // ---- Req-4: DGS 承重能力需求 ----
+    requirement <'Req-4'> loadCapacityRequirement {
+        doc /* DGS 承重能力应不小于 25 kg, 用于支撑 Droplet Generator 本体
+             *   及附属管路/电缆. */
+        subject dgs : DGS;
+        attribute requiredLoadCapacity : MassValue = 25 [kg];
+        require constraint loadCapacityBound {
+            dgs.loadCapacity >= requiredLoadCapacity
+        }
+    }
+
+    // ---- Req-5: DGS 抗压差 (耐放气 / 抽真空) 能力需求 ----
+    requirement <'Req-5'> differentialPressureRequirement {
+        doc /* DGS 结构可承受的内外压差 ΔP 应不小于 1×10^5 Pa (约一个大气压).
+             *
+             *   语义澄清: DGS 的名义工作环境是高真空 (见 ambientEnvironment,
+             *   约 1×10^-5 Pa). 本需求并非"工作环境绝对压力上限", 而是结构在
+             *   以下瞬态工况下两侧出现的压差承受能力:
+             *     - 放气 (vent):       舱体由高真空回充至大气 (~1×10^5 Pa);
+             *     - 抽真空 (pump-down): 舱体由大气抽降至高真空;
+             *   上述过程中, DGS 的密封面 / 夹层 / 波纹管 / 法兰 / 焊缝 两侧可能
+             *   承受接近一个大气压的压差, 结构不得发生屈服、永久变形或泄漏.
+             *   定义 ΔP = |p_inside − p_outside|, 取全工况包络的最大值.
+             *
+             *   测试方法: 压差/检漏试验 (如氦质谱检漏 + 充压保持), 在最大 ΔP
+             *   下保持规定时长, 验证无永久变形且漏率在允许范围内. */
+        subject dgs : DGS;
+        attribute requiredDifferentialPressure : PressureValue = 1.0e5 [Pa];
+        require constraint differentialPressureBound {
+            dgs.differentialPressureCapacity >= requiredDifferentialPressure
+        }
+    }
+
+    // ---- Req-6: DGS 自身重量约束 ----
+    requirement <'Req-6'> stageWeightRequirement {
+        doc /* DGS 自身重量应小于 40 kg, 以满足上级结构承载与装配限制. */
+        subject dgs : DGS;
+        attribute maxStageWeight : MassValue = 40 [kg];
+        require constraint stageWeightBound {
+            dgs.stageOwnWeight < maxStageWeight
+        }
+    }
 
     // ============================================================
     // 闭环带宽测试用例 (Verification Case) - 阶跃响应法
@@ -905,39 +926,48 @@ package DGSS_Model {
         }
         
         first start;
-        then action setupSensor;
+        // ★ FIX: 以下 doc 原以独立成员形式出现, 实际注解的是外层 use case 而非
+        //   其前的 action; 现移入各 action 体内, 与状态机内的写法保持一致.
+        then action setupSensor {
             doc /* 接入共焦位移传感器 (confocal displacement sensor) 作为位置反馈装置,
                  * 确保传感器采样率远高于预期带宽 (建议 ≥ 10 倍), 并完成零位标定。 */
-        then action setOperatingPoint;
+        }
+        then action setOperatingPoint {
             doc /* 将 DGS 置于额定工作点 (零位附近), 锁定其他自由度,
                  * 仅保留被测自由度处于闭环控制状态。 */
-        then action injectStepCommand;
+        }
+        then action injectStepCommand {
             doc /* 向被测自由度发送小幅阶跃指令:
                  *   - 阶跃幅度: 例如 10 μm (在线性区内, 远小于行程极限)
                  *   - 阶跃形式: 理想阶跃 (上升沿尽量陡峭)
                  *   - 起始点: 当前稳态工作点
                  *   - 保持时间: 足够长以观察完整的瞬态过程并达到新稳态。 */
-        then action recordStepResponse;
+        }
+        then action recordStepResponse {
             doc /* 用共焦位移传感器同步采集:
                  *   - 阶跃指令信号 u(t)
                  *   - 实际位移响应曲线 y(t)
                  * 采样率应足以分辨上升沿细节 (建议 ≥ 1 kHz)。 */
-        then action extractRiseTime;
+        }
+        then action extractRiseTime {
             doc /* 从响应曲线 y(t) 中提取上升时间 tr:
                  *   - 确定稳态终值 y_final (取响应后段的平均值)
                  *   - 找到 y(t) 首次到达 10% × y_final 的时刻 t10
                  *   - 找到 y(t) 首次到达 90% × y_final 的时刻 t90
                  *   - 上升时间 tr = t90 - t10。 */
-        then action estimateBandwidth;
+        }
+        then action estimateBandwidth {
             doc /* 按一阶系统近似公式估算闭环带宽:
                  *      BW ≈ 0.35 / tr
                  * 对每个受控自由度分别计算; 系统带宽取所有自由度中的最小值。 */
-        then action verifyAgainstRequirement;
+        }
+        then action verifyAgainstRequirement {
             doc /* 与 Req2 (≥ 5 Hz) 比对; 同时记录:
                  *   - 超调量 (overshoot)
                  *   - 稳态误差 (steady-state error)
                  *   - 调节时间 (settling time)
                  * 作为系统动态性能的辅助评估指标。 */
+        }
     }
 
     // ============================================================
@@ -1008,12 +1038,9 @@ package DGSS_Model {
         // ============================================================
         attribute idealHitOffsetFromBottom : LengthValue = 14.9 [mm];
         
-        calc def getIdealHitLocalZ {
-            in geo : TCApertureGeometry;
-            return : LengthValue;
-            // 计算逻辑: -lowerRectangleHeight + idealHitOffsetFromBottom
-            // 结果为: -20.8873 + 14.9 = -5.9873 [mm]
-        }        
+        // ★ FIX: 原嵌于此处的 calc def getIdealHitLocalZ 已提升至包级
+        //   (DataType 内嵌 calc def 的工具兼容性存疑, 且与 pointInsideTCAperture
+        //    的放置位置不一致), 见下方包级定义, 并已落地为可求值表达式.
         
         // 判定点 (yp, zp) 是否落在开口内
         // 假设 centerPosition 处 y=0, z=0 为半圆/矩形交界中心
@@ -1021,17 +1048,25 @@ package DGSS_Model {
         //   下矩形区域: -H <= z <= 0 且 |y| <= W/2
     }
     
+    // ---- 理想落点局部 Z 坐标: -H + offset = -20.8873 + 14.9 = -5.9873 [mm] ----
+    calc def getIdealHitLocalZ {
+        in geo : TCApertureGeometry;
+        return result : LengthValue =
+            geo.idealHitOffsetFromBottom - geo.lowerRectangleHeight;
+    }        
+    
+    // ★ FIX: 落地为可求值表达式 (原仅注释级占位)
     calc def pointInsideTCAperture {
         in yp : LengthValue;
         in zp : LengthValue;
         in geo : TCApertureGeometry;
-        return : Boolean;
-        // 实现示意 (具体语法依据 SysML v2 工具支持调整):
-        //   ( zp >= 0[mm] and (yp*yp + zp*zp) <= geo.upperSemicircleRadius * geo.upperSemicircleRadius )
-        //   or
-        //   ( zp <  0[mm] and zp >= -geo.lowerRectangleHeight 
-        //                 and yp >= -geo.lowerRectangleWidth/2
-        //                 and yp <=  geo.lowerRectangleWidth/2 )
+        return result : Boolean =
+            ( zp >= 0 [mm] and
+              (yp*yp + zp*zp) <= geo.upperSemicircleRadius * geo.upperSemicircleRadius )
+            or
+            ( zp <  0 [mm] and zp >= -geo.lowerRectangleHeight
+                           and yp >= -geo.lowerRectangleWidth/2
+                           and yp <=  geo.lowerRectangleWidth/2 );
     }
     
     calc def pointInsideAperture {
@@ -1075,7 +1110,7 @@ package DGSS_Model {
         attribute aperture          : TCApertureGeometry;
         attribute idealCollectionPosition: Position3D;
         port inletPort              : DropletInletPort;
-        attribute hasCollected      : Boolean := false;     // ★ FIX④: 运行期可变状态用初值 `:=`
+        attribute hasCollected      : Boolean := false;   // ★ FIX④: 运行期可变状态用初值 `:=`
     }
 
     part def <FDS> 'Fine Detection System' {
@@ -1115,16 +1150,22 @@ package DGSS_Model {
         attribute measuredStability : DropletStability;
 
         port feedbackPort : ~ControlSignalPort;
+        // [设计注记] ~ControlSignalPort 意味着 FDS 直接输出 DGSCommand, 即控制律
+        //   内嵌于 FDS. 若实际架构中控制器位于 DGS 侧, 建议 FDS 改为输出测量量
+        //   (DropletStability), 由 DGS 内部 calc 生成命令. 留待 v6 架构决策.
 
-        // ---- FDS 性能需求 ----
-        requirement <'Req-FDS-1'> stabilityMeasurementAccuracy {
-            doc /* FDS 在 Y / Z 方向的空间测量分辨率应不大于 1 μm,
-                 *   以保证可分辨 15 μm/3σ 的稳定性阈值. */
-            require constraint spatialResolutionBound {
-                detection.spatialResolution <= 1 [um]
-            }
-        }
+        // ★ FIX⑨: 原嵌于此处的 Req-FDS-1 已提升至包级 (见 FDS 定义之后).
     }    
+
+    // ---- Req-FDS-1: FDS 空间测量分辨率需求 (包级, ★ FIX⑨) ----
+    requirement <'Req-FDS-1'> stabilityMeasurementAccuracy {
+        doc /* FDS 在 Y / Z 方向的空间测量分辨率应不大于 1 μm,
+             *   以保证可分辨 15 μm/3σ 的稳定性阈值. */
+        subject theFds : FDS;
+        require constraint spatialResolutionBound {
+            theFds.detection.spatialResolution <= 1 [um]
+        }
+    }
         
     port def DropletOutletPort {
         out dropletFlow : Droplet;
@@ -1179,13 +1220,25 @@ package DGSS_Model {
         }
         
         // ============================================================
-        // ★ D3: 端口互连 (补齐原先缺失的 connect 拓扑)
+        // ★ D3 / FIX: 端口互连. 物项交换 (液滴/指令) 升级为 flow,
+        //   显式表达传递方向与载荷; 机械安装关系保留为 connect.
         // ============================================================
-        connect nozzle.outletPort to tc.inletPort;        // 液滴流: out Droplet → in Droplet
-        connect fds.feedbackPort  to dgs.controlPort;      // 闭环反馈: FDS(out) → DGS(in command)
+        flow from nozzle.outletPort.dropletFlow to tc.inletPort.dropletFlow;   // 液滴流: out Droplet → in Droplet
+        flow from fds.feedbackPort.command     to dgs.controlPort.command;     // 闭环反馈: FDS(out command) → DGS(in command)
         connect body.nozzleMount  to nozzle.mountingPort;  // 机械: DG 本体 ↔ Nozzle
         connect dgs.loadPort      to body.stageMount;      // 机械: DGS 承载口 ↔ DG 台架口
         // 注: Shroud.mountingPort / InletHole 当前无明确配对端口, 暂未连        
+
+        // ============================================================
+        // ★ FIX⑨: 需求满足声明 — 把包级需求绑定到本系统的具体主体
+        // ============================================================
+        satisfy requirement dropletAdjustableRangeRequirement by dgs;
+        satisfy requirement closedLoopBandwidthRequirement    by dgs;
+        satisfy requirement adjustmentResolutionRequirement   by dgs;
+        satisfy requirement loadCapacityRequirement           by dgs;
+        satisfy requirement differentialPressureRequirement   by dgs;
+        satisfy requirement stageWeightRequirement            by dgs;
+        satisfy requirement stabilityMeasurementAccuracy      by fds;
         
         ref item targetRef   = PF;
         ref item monitorRef  = monitorPosition;
@@ -1211,17 +1264,24 @@ package DGSS_Model {
         attribute faultFlag    : Boolean = uncollectableDetected;
 
         // ============================================================
-        // ★ 新增: DGSS 状态机
+        // ★ DGSS 状态机
         //   States: Initialization → Idle → ClosedLoopLocking
         //   Any state → Fault (异常发生)
         //   Fault → Initialization (复位后重新初始化)
+        // ★ FIX⑥: 改为 exhibit state, 确保该状态行为由 DGSS 实例履行
+        //   (裸 state 成员仅声明特征, 不保证被宿主表现).
+        // ★ FIX⑤: 仅含 if 守卫的迁移改为 accept when 变化触发. 原因: 无触发器的
+        //   迁移仅在源状态"完成"时被使能, 而 Idle/ClosedLoopLocking 含无界 do
+        //   动作永不完成 → 守卫永无评估时机; Fault 虽可完成, 但完成瞬间若
+        //   resetCommand 为假, 迁移错过后再无重评机制. 改用变化触发后, 条件
+        //   变为真的时刻即触发迁移.
         // ============================================================
-        state DGSSStateMachine {
+        exhibit state DGSSStateMachine {
             entry; then Initialization;
 
             // ---------------- Initialization ----------------
             state Initialization {
-                // ★ FIX①②: 删除行首 + 补丁标记; 统一为单个复合 entry 动作 (与 Idle/Locking 风格一致), doc 内置于各 action
+                // ★ FIX①②: 统一为单个复合 entry 动作 (与 Idle/Locking 风格一致), doc 内置于各 action
                 entry action initSequence {
                     first start;
                     then action homeDGS {
@@ -1243,61 +1303,67 @@ package DGSS_Model {
                 accept after (1 [s])      // 占位: 实际由 verifyInitComplete 完成事件触发
                 if (not faultFlag)
                 then Idle;
-            // 初始化失败 → Fault
+            // 初始化失败 → Fault   (★ FIX⑤: 改为变化触发)
             transition initToFault
                 first Initialization
-                if (faultFlag)
+                accept when faultFlag
                 then Fault;
 
             // ---------------- Idle ----------------
             state Idle {
                 doc /* 初始化完成或从 ClosedLoopLocking 退出后的待命状态.
                      *   液滴可能正在喷射, 但 DGS 控制环未参与闭环锁定. */
-                entry action openControlLoop {                                     // (替换上面两行)
+                entry action openControlLoop {
                     doc /* 释放闭环锁定 (若曾激活), DGS 维持当前姿态. */
                     assign currentState := DGSSOperatingState::idle;               // ★ D5
                 }
                 do action monitorStability {
                     doc /* 持续从 FDS 读取液滴稳定性测量结果, 但不闭环修正. */
-                    assign uncollectableDetected := uncollectableDetected or lastDropletMissedTC;   // ★ FIX③: 锁存置位
+                    // ★ FIX⑧: 锁存改为变化事件驱动的循环. v5.1 的单次 assign 仅在
+                    //   进入状态的瞬间采样一次, 不具备"持续锁存"语义.
+                    loop action latchOnMissIdle {
+                        accept when lastDropletMissedTC;
+                        then assign uncollectableDetected := true;
+                    }
                 }
             }
-            // Idle → ClosedLoopLocking : 仅当 Y/Z 横向稳定性达标
+            // Idle → ClosedLoopLocking : 仅当 Y/Z 横向稳定性达标   (★ FIX⑤)
             transition idleToLocking
                 first Idle
-                if (fds.measuredStability.isTransverseStable and not faultFlag)
+                accept when (fds.measuredStability.isTransverseStable and not faultFlag)
                 then ClosedLoopLocking;
-            // Idle → Fault
+            // Idle → Fault   (★ FIX⑤)
             transition idleToFault
                 first Idle
-                if (faultFlag)
+                accept when faultFlag
                 then Fault;
 
             // ---------------- ClosedLoopLocking ----------------
             state ClosedLoopLocking {
                 doc /* 利用 FDS 实时反馈, 闭环调整 DGS, 使液滴稳定锁定在
                      *   FDS 参考位置 (monitorPosition). */
-                entry action engageClosedLoop {                                    // (替换上面两行)
+                entry action engageClosedLoop {
                     doc /* 接入 FDS → DGS 闭环路径, 开启位置闭环控制器. */
                     assign currentState := DGSSOperatingState::closedLoopLocking;  // ★ D5
                 }                    
                 do action trackReference {
                     doc /* 实时计算液滴位置误差, 输出 DGS 修正指令. */
-                    assign uncollectableDetected := uncollectableDetected or lastDropletMissedTC;   // ★ FIX③: 锁存置位
+                    // ★ FIX⑧: 同 monitorStability, 事件驱动锁存
+                    loop action latchOnMissLocking {
+                        accept when lastDropletMissedTC;
+                        then assign uncollectableDetected := true;
+                    }
                 }
             }
-            // ClosedLoopLocking → Idle : 横向稳定性失守 或 收到退出指令
+            // ClosedLoopLocking → Idle : 横向稳定性失守 (★ FIX⑤)
             transition lockingToIdle
                 first ClosedLoopLocking
-                if (
-                    (not fds.measuredStability.isTransverseStable) and
-                    (not faultFlag)
-                )
+                accept when ((not fds.measuredStability.isTransverseStable) and (not faultFlag))
                 then Idle;
-            // ClosedLoopLocking → Fault
+            // ClosedLoopLocking → Fault   (★ FIX⑤)
             transition lockingToFault
                 first ClosedLoopLocking
-                if (faultFlag)
+                accept when faultFlag
                 then Fault;
 
             // ---------------- Fault ----------------
@@ -1311,10 +1377,10 @@ package DGSS_Model {
                 //entry action executeSafetyResponse;
                 //    doc /* 见 dropletCannotBeCollectedSafetyResponse 定义的应对措施. */
             }
-            // Fault → Initialization : 外部复位
-            transition faultToInit                                              // ★ FIX③: 复位由操作员指令触发, effect 清锁存
+            // Fault → Initialization : 外部复位 (★ FIX⑤: 复位指令到来即触发)
+            transition faultToInit
                 first Fault
-                if (resetCommand)
+                accept when resetCommand
                 do action clearFaultLatch {
                     assign uncollectableDetected := false;     // 清除故障锁存
                     assign resetCommand          := false;     // 复位指令自清除 (单次触发)
@@ -1419,7 +1485,7 @@ package DGSS_Model {
                 crossingPointAtX(d.trajectory, c.aperture.centerPosition.x).z
                     - c.aperture.centerPosition.z,
                 c.aperture
-            ) == true
+            )
         }
     }
 
@@ -1587,30 +1653,32 @@ package DGSS_Model {
 
         first start;
 
-        then action loadCalibration;
+        // ★ FIX: doc 移入各 action 体内 (原以独立成员形式注解了外层 use case)
+        then action loadCalibration {
             doc /* 加载 dgsInstallCalibration: α=28°, β=78°,
                  *   Lpsx=916.328834 mm, Lpsy=43.549721 mm, Lpsz=81.905114 mm. */
-
-        then action specifyTargetInPFCS;
+        }
+        then action specifyTargetInPFCS {
             doc /* 指定 PF 系下的目标点 P_p. 典型取值: PF (0,0,0) 或 monitorPosition (5,0,0). */
-
-        then action computeT_ps;
+        }
+        then action computeT_ps {
             doc /* 由标定参数构建 DGSCS → PFCS 固定变换 T_ps. */
-
-        then action computeRequiredT_sl;
+        }
+        then action computeRequiredT_sl {
             doc /* 求解 T_sl: 利用 invertTransform(T_ps) 得 T_sp,
                  *   并由 T_sp · P_p 给出喷嘴出口在 DGSCS 下应到达的位置 P_s.
                  *   再结合 P_l (喷嘴出口在 DGSLCS 下的标称位置) 解 T_sl. */
-
-        then action extractEulerAndTranslation;
+        }
+        then action extractEulerAndTranslation {
             doc /* 从 T_sl 的旋转 3×3 子矩阵按 ZYX 反解 (α, β, γ),
                  *   并从第 4 列得 (tx, ty, tz). */
-
-        then action verifyWithinTravelLimits;
+        }
+        then action verifyWithinTravelLimits {
             doc /* 校验 (tx, ty, tz, α, β, γ) 满足 DGS 的 singleAxisTravelLimits
                  *   与 coupledWorkspaceReachability. 若不满足则报告反解失败. */
-
-        then action issueDGSCommand;
+        }
+        then action issueDGSCommand {
             doc /* 把反解结果打包为 DGSCommand 通过 controlPort 下发. */
+        }
     }    
 }

@@ -1,0 +1,408 @@
+// =====================================================================
+//  DGSS_Model — 坐标变换核 优化补丁 (v5.0, 基于 v4.3)
+//
+//  本文件是 *补丁集*: 把其中成员合并进 package DGSS_Model, 替换 v4.3 中
+//  同名/对应的旧成员。其余部分 (需求 Req-1..6、状态机、弹道、TC 几何、
+//  FrameKind 标签、各 part/item) 保持 v4.3 不变。
+//
+//  优化要点 (对应本次讨论的结论):
+//   1. 删除手搓的 HomogeneousTransform / Vector4，统一改用标准库
+//      MeasurementReferences::AffineTransformationMatrix3d
+//      (自动补底行 (0,0,0,1)；分解为 rotationMatrix:Real[9] + translationVector)。
+//   2. 旋转矩阵存储序 = row-major (由库 elements 派生式钉死)；
+//      变换语义 = 列向量左乘 [p]_source = M·[p]_target (库铁律)。
+//   3. buildTransform_DGSLCS_to_DGSCS:
+//        - 角度先 /(1[radian]) 消量纲 → Real，才能喂 TrigFunctions::sin/cos；
+//        - R = Rz(α)·Ry(β)·Rx(γ)，采用 *验证过的正确符号* (第2行 (2,2)/(2,3) 为
+//          +sα·sβ·sγ+cα·cγ / +sα·sβ·cγ−cα·sγ，非 Craig 4th ed. 的印刷错版)。
+//   4. 平移元素是「由 frame mRefs 解释的纯 Real」：统一 /(1[mm])，与下方
+//      MillimetreFrame3d 的 mRefs=(millimetre,...) 对齐 (光刻 mm/µm 量级)。
+//   5. 四个坐标系升级为 ThreeDCoordinateFrame，用 transformation 的 source/target
+//      固化「谁安置在谁里面」，杜绝接反 (target=that 由库保证)。
+//   6. 原为注释桩的 builders 全部实现为可求值表达式。
+//
+//  置信度标注：
+//   [H]  高 — 已多次推导/对照库源
+//   [M]  中 — 公式按 v4.3 已验证注释转写，或语法需在工具中复核
+// =====================================================================
+
+package DGSS_Model {
+
+    // ---- 替换 v4.3 的 import 段 ----
+    private import ScalarValues::*;
+    private import ISQ::*;                    // LengthValue, PlaneAngleValue
+    private import SI::*;                     // radian, metre, micro, millimetre
+    private import TrigFunctions::*;          // sin, cos
+    private import ScalarFunctions::*;
+    private import NumericalFunctions::*;
+    private import VectorValues::ThreeVectorValue;
+    private import MeasurementReferences::*;  // CoordinateFrame, ThreeDCoordinateFrame,
+                                              // AffineTransformationMatrix3d, NullTransformation
+    //  注: v4.3 的 `import SpatialFrames::*` 删除 —— 变换/坐标系类型在
+    //      MeasurementReferences (见你提供的库源)。若你的库版本两者并存，
+    //      请确认 AffineTransformationMatrix3d 实际所在包 [M]。
+
+    attribute <um> micrometer : LengthUnit = micro * metre;
+
+    // =================================================================
+    //  坐标系类型: 三轴单位均为 mm 的 3D 正交坐标系
+    //  [M] millimetre 的确切元素名请核 SI 库 (可能是 millimetre，或 mm 别名)
+    // =================================================================
+    attribute def MillimetreFrame3d :> ThreeDCoordinateFrame {
+        attribute :>> mRefs = (millimetre, millimetre, millimetre);
+        attribute :>> isOrthogonal = true;
+    }
+
+    // =================================================================
+    //  通用算子
+    // =================================================================
+
+    // ---- 应用变换: [p]_source = M · [p]_target ----
+    //  点坐标按 mm 解释；先 /(1[mm]) 取纯数，算完 *(1[mm]) 复原量纲。 [H]
+    calc def applyTransform {
+        in M : AffineTransformationMatrix3d;
+        in p : Position3D;                       // Position3D 沿用 v4.3 定义
+        //return : Position3D;
+
+        private attribute px : Real = p.x / (1 [mm]);
+        private attribute py : Real = p.y / (1 [mm]);
+        private attribute pz : Real = p.z / (1 [mm]);
+
+        // row-major, 1-based 索引 (与库 elements#(n) 一致) [H]
+        private attribute r11 : Real = M.rotationMatrix.elements#(1);
+        private attribute r12 : Real = M.rotationMatrix.elements#(2);
+        private attribute r13 : Real = M.rotationMatrix.elements#(3);
+        private attribute r21 : Real = M.rotationMatrix.elements#(4);
+        private attribute r22 : Real = M.rotationMatrix.elements#(5);
+        private attribute r23 : Real = M.rotationMatrix.elements#(6);
+        private attribute r31 : Real = M.rotationMatrix.elements#(7);
+        private attribute r32 : Real = M.rotationMatrix.elements#(8);
+        private attribute r33 : Real = M.rotationMatrix.elements#(9);
+        private attribute tx  : Real = M.translationVector.elements#(1);
+        private attribute ty  : Real = M.translationVector.elements#(2);
+        private attribute tz  : Real = M.translationVector.elements#(3);
+
+        return result : Position3D {
+            attribute :>> x = (r11*px + r12*py + r13*pz + tx) * (1 [mm]);
+            attribute :>> y = (r21*px + r22*py + r23*pz + ty) * (1 [mm]);
+            attribute :>> z = (r31*px + r32*py + r33*pz + tz) * (1 [mm]);
+        }
+    }
+
+    // ---- 复合: composeTransforms(T1, T2) = T1 · T2  (T1 外层, T2 内层) ----
+    //  [M] 4×4 矩阵积已手工展开为 row-major；务必用 SymPy/Syside 复核索引。
+    calc def composeTransforms {
+        in T1 : AffineTransformationMatrix3d;
+        in T2 : AffineTransformationMatrix3d;
+        //return : AffineTransformationMatrix3d;
+
+        private attribute a11 : Real = T1.rotationMatrix.elements#(1);
+        private attribute a12 : Real = T1.rotationMatrix.elements#(2);
+        private attribute a13 : Real = T1.rotationMatrix.elements#(3);
+        private attribute a21 : Real = T1.rotationMatrix.elements#(4);
+        private attribute a22 : Real = T1.rotationMatrix.elements#(5);
+        private attribute a23 : Real = T1.rotationMatrix.elements#(6);
+        private attribute a31 : Real = T1.rotationMatrix.elements#(7);
+        private attribute a32 : Real = T1.rotationMatrix.elements#(8);
+        private attribute a33 : Real = T1.rotationMatrix.elements#(9);
+        private attribute t1x : Real = T1.translationVector.elements#(1);
+        private attribute t1y : Real = T1.translationVector.elements#(2);
+        private attribute t1z : Real = T1.translationVector.elements#(3);
+
+        private attribute b11 : Real = T2.rotationMatrix.elements#(1);
+        private attribute b12 : Real = T2.rotationMatrix.elements#(2);
+        private attribute b13 : Real = T2.rotationMatrix.elements#(3);
+        private attribute b21 : Real = T2.rotationMatrix.elements#(4);
+        private attribute b22 : Real = T2.rotationMatrix.elements#(5);
+        private attribute b23 : Real = T2.rotationMatrix.elements#(6);
+        private attribute b31 : Real = T2.rotationMatrix.elements#(7);
+        private attribute b32 : Real = T2.rotationMatrix.elements#(8);
+        private attribute b33 : Real = T2.rotationMatrix.elements#(9);
+        private attribute t2x : Real = T2.translationVector.elements#(1);
+        private attribute t2y : Real = T2.translationVector.elements#(2);
+        private attribute t2z : Real = T2.translationVector.elements#(3);
+
+        return result : AffineTransformationMatrix3d {
+            attribute :>> rotationMatrix {
+                attribute :>> elements = (
+                    a11*b11+a12*b21+a13*b31,  a11*b12+a12*b22+a13*b32,  a11*b13+a12*b23+a13*b33,
+                    a21*b11+a22*b21+a23*b31,  a21*b12+a22*b22+a23*b32,  a21*b13+a22*b23+a23*b33,
+                    a31*b11+a32*b21+a33*b31,  a31*b12+a32*b22+a33*b32,  a31*b13+a32*b23+a33*b33 );
+            }
+            attribute :>> translationVector {
+                attribute :>> elements = (
+                    a11*t2x + a12*t2y + a13*t2z + t1x,
+                    a21*t2x + a22*t2y + a23*t2z + t1y,
+                    a31*t2x + a32*t2y + a33*t2z + t1z );
+            }
+        }
+    }
+
+    // ---- 刚体逆: R' = Rᵀ, t' = -Rᵀ·t ----  [M] 复核
+    calc def invertTransform {
+        in T : AffineTransformationMatrix3d;
+        //return : AffineTransformationMatrix3d;
+
+        private attribute r11 : Real = T.rotationMatrix.elements#(1);
+        private attribute r12 : Real = T.rotationMatrix.elements#(2);
+        private attribute r13 : Real = T.rotationMatrix.elements#(3);
+        private attribute r21 : Real = T.rotationMatrix.elements#(4);
+        private attribute r22 : Real = T.rotationMatrix.elements#(5);
+        private attribute r23 : Real = T.rotationMatrix.elements#(6);
+        private attribute r31 : Real = T.rotationMatrix.elements#(7);
+        private attribute r32 : Real = T.rotationMatrix.elements#(8);
+        private attribute r33 : Real = T.rotationMatrix.elements#(9);
+        private attribute tx  : Real = T.translationVector.elements#(1);
+        private attribute ty  : Real = T.translationVector.elements#(2);
+        private attribute tz  : Real = T.translationVector.elements#(3);
+
+        return result : AffineTransformationMatrix3d {
+            attribute :>> rotationMatrix {
+                attribute :>> elements = (    // 转置
+                    r11, r21, r31,
+                    r12, r22, r32,
+                    r13, r23, r33 );
+            }
+            attribute :>> translationVector {
+                attribute :>> elements = (    // -Rᵀ·t
+                    -(r11*tx + r21*ty + r31*tz),
+                    -(r12*tx + r22*ty + r32*tz),
+                    -(r13*tx + r23*ty + r33*tz) );
+            }
+        }
+    }
+
+    // =================================================================
+    //  变换 0 (实时): DGSLCS → DGSCS，由 DGS 命令 6-DOF 决定
+    //   R = Rz(α)·Ry(β)·Rx(γ)，正确符号；平移 = 命令平移 (mm 数值)
+    //   语义: [p]_DGSCS = M · [p]_DGSLCS  ⇒ 该矩阵挂在 dgslcs 上, source=dgscs
+    // =================================================================  [H]
+    calc def buildTransform_DGSLCS_to_DGSCS {
+        in alpha_Rz : PlaneAngleValue;   // yaw  (Rz)
+        in beta_Ry  : PlaneAngleValue;   // pitch(Ry)
+        in gamma_Rx : PlaneAngleValue;   // roll (Rx)
+        in tx : LengthValue;  in ty : LengthValue;  in tz : LengthValue;
+
+        private attribute a : Real = alpha_Rz / (1 [radian]);
+        private attribute b : Real = beta_Ry  / (1 [radian]);
+        private attribute g : Real = gamma_Rx / (1 [radian]);
+        private attribute ca : Real = cos(a);  private attribute sa : Real = sin(a);
+        private attribute cb : Real = cos(b);  private attribute sb : Real = sin(b);
+        private attribute cg : Real = cos(g);  private attribute sg : Real = sin(g);
+
+        return result : AffineTransformationMatrix3d {
+            attribute :>> rotationMatrix {
+                attribute :>> elements = (
+                    ca*cb,  ca*sb*sg - sa*cg,  ca*sb*cg + sa*sg,
+                    sa*cb,  sa*sb*sg + ca*cg,  sa*sb*cg - ca*sg,
+                     -sb,   cb*sg,             cb*cg );
+            }
+            attribute :>> translationVector {
+                attribute :>> elements = ( tx/(1 [mm]), ty/(1 [mm]), tz/(1 [mm]) );
+            }
+        }
+    }
+
+    // =================================================================
+    //  变换 1: DGSCS → MCS  (β=78° 固定)  [M] 公式转写自 v4.3 验证注释
+    // =================================================================
+    calc def buildTransform_DGSCS_to_MCS {
+        in beta_install : PlaneAngleValue;
+        in Losx : LengthValue;  in Losy : LengthValue;  in Losz : LengthValue;
+
+        private attribute b : Real = beta_install / (1 [radian]);
+        private attribute cb : Real = cos(b);  private attribute sb : Real = sin(b);
+
+        return result : AffineTransformationMatrix3d {
+            attribute :>> rotationMatrix {
+                attribute :>> elements = (
+                    0,   cb,   sb,
+                   -1,    0,    0,
+                    0,  -sb,   cb );
+            }
+            attribute :>> translationVector {
+                attribute :>> elements = ( Losx/(1 [mm]), Losy/(1 [mm]), Losz/(1 [mm]) );
+            }
+        }
+    }
+
+    // =================================================================
+    //  变换 2: MCS → PFCS  (α=28° 固定)  [M]
+    // =================================================================
+    calc def buildTransform_MCS_to_PFCS {
+        in alpha_install : PlaneAngleValue;
+        in Lopx : LengthValue;  in Lopy : LengthValue;  in Lopz : LengthValue;
+
+        private attribute a : Real = alpha_install / (1 [radian]);
+        private attribute ca : Real = cos(a);  private attribute sa : Real = sin(a);
+
+        return result : AffineTransformationMatrix3d {
+            attribute :>> rotationMatrix {
+                attribute :>> elements = (
+                    1,    0,    0,
+                    0,   ca,   sa,
+                    0,  -sa,   ca );
+            }
+            attribute :>> translationVector {
+                attribute :>> elements = (
+                    (0 [mm] - Lopx) / (1 [mm]),
+                    (0 [mm] - Lopy*ca - Lopz*sa) / (1 [mm]),
+                    (Lopy*sa - Lopz*ca) / (1 [mm]) );
+            }
+        }
+    }
+
+    // =================================================================
+    //  变换 3 (复合): DGSCS → PFCS = MCS_to_PFCS · DGSCS_to_MCS  [M]
+    //   平移列 = L_ps = (916.328834, 43.549721, 81.905114) mm (附录已验证)
+    // =================================================================
+    calc def buildTransform_DGSCS_to_PFCS {
+        in alpha_install : PlaneAngleValue;
+        in beta_install  : PlaneAngleValue;
+        in Lopx : LengthValue;  in Lopy : LengthValue;  in Lopz : LengthValue;
+        in Losx : LengthValue;  in Losy : LengthValue;  in Losz : LengthValue;
+
+        private attribute a : Real = alpha_install / (1 [radian]);
+        private attribute b : Real = beta_install  / (1 [radian]);
+        private attribute ca : Real = cos(a);  private attribute sa : Real = sin(a);
+        private attribute cb : Real = cos(b);  private attribute sb : Real = sin(b);
+
+        return result : AffineTransformationMatrix3d {
+            attribute :>> rotationMatrix {
+                attribute :>> elements = (
+                     0,    cb,      sb,
+                   -ca,  -sa*sb,  sa*cb,
+                    sa,  -ca*sb,  ca*cb );
+            }
+            attribute :>> translationVector {
+                attribute :>> elements = (
+                    (Losx - Lopx) / (1 [mm]),
+                    ((Losy-Lopy)*ca + (Losz-Lopz)*sa) / (1 [mm]),
+                    ((Lopy-Losy)*sa + (Losz-Lopz)*ca) / (1 [mm]) );
+            }
+        }
+    }
+
+    // =================================================================
+    //  变换 4 (逆): PFCS → DGSCS = invertTransform(DGSCS_to_PFCS)  [M]
+    // =================================================================
+    calc def buildTransform_PFCS_to_DGSCS {
+        in alpha_install : PlaneAngleValue;
+        in beta_install  : PlaneAngleValue;
+        in Lopx : LengthValue;  in Lopy : LengthValue;  in Lopz : LengthValue;
+        in Losx : LengthValue;  in Losy : LengthValue;  in Losz : LengthValue;
+        //return : AffineTransformationMatrix3d;
+
+        private attribute a : Real = alpha_install / (1 [radian]);
+        private attribute b : Real = beta_install  / (1 [radian]);
+        private attribute ca : Real = cos(a);  private attribute sa : Real = sin(a);
+        private attribute cb : Real = cos(b);  private attribute sb : Real = sin(b);
+
+        return result : AffineTransformationMatrix3d {
+            attribute :>> rotationMatrix {
+                attribute :>> elements = (
+                    0,    -ca,     sa,
+                   cb,  -sa*sb,  -ca*sb,
+                   sb,   sa*cb,   ca*cb );
+            }
+            attribute :>> translationVector {
+                attribute :>> elements = (
+                    (Losy - Lopy) / (1 [mm]),
+                    ((Lopx-Losx)*cb - (Lopz-Losz)*sb) / (1 [mm]),
+                    ((Lopx-Losx)*sb + (Lopz-Losz)*cb) / (1 [mm]) );
+            }
+        }
+    }
+
+    // =================================================================
+    //  高层: 完整 DGSLCS → PFCS = T_ps · T_sl  [H 结构 / M 依赖 compose 复核]
+    // =================================================================
+    calc def buildTransform_DGSLCS_to_PFCS {
+        in alpha_Rz : PlaneAngleValue;
+        in beta_Ry  : PlaneAngleValue;
+        in gamma_Rx : PlaneAngleValue;
+        in tx : LengthValue;  in ty : LengthValue;  in tz : LengthValue;
+        in calib : DGSInstallationCalibration;
+
+        private attribute T_sl : AffineTransformationMatrix3d =
+            buildTransform_DGSLCS_to_DGSCS(alpha_Rz, beta_Ry, gamma_Rx, tx, ty, tz);
+        private attribute T_ps : AffineTransformationMatrix3d =
+            buildTransform_DGSCS_to_PFCS(
+                calib.alpha_install, calib.beta_install,
+                calib.Lopx, calib.Lopy, calib.Lopz,
+                calib.Losx, calib.Losy, calib.Losz);
+
+        return composeTransforms(T_ps, T_sl);
+    }
+
+    calc def transformPoint_DGSLCS_to_PFCS {
+        in pointInDGSLCS : Position3D;
+        in alpha_Rz : PlaneAngleValue;  in beta_Ry : PlaneAngleValue;  in gamma_Rx : PlaneAngleValue;
+        in tx : LengthValue;  in ty : LengthValue;  in tz : LengthValue;
+        in calib : DGSInstallationCalibration;
+
+        private attribute T : AffineTransformationMatrix3d =
+            buildTransform_DGSLCS_to_PFCS(alpha_Rz, beta_Ry, gamma_Rx, tx, ty, tz, calib);
+        return applyTransform(T, pointInDGSLCS);
+    }
+
+    // =================================================================
+    //  四坐标系实例 + 安置关系 (source/target)
+    //   链: DGSLCS ⊂ DGSCS ⊂ MCS ⊂ PFCS(根)
+    //   规则: 子系.transformation.source = 父系；target=that 由库自动 = 子系本身。
+    //         即 [p]_父 = M · [p]_子，与 buildTransform_子_to_父 命名一致。
+    //  [M] frame↔矩阵的「值绑定」语法请在工具中复核 (见下方说明，两种写法可选)。
+    // =================================================================
+    attribute pfcs : MillimetreFrame3d;                       // 根参考系，无 transformation
+
+    attribute mcs : MillimetreFrame3d {
+        attribute :>> transformation : AffineTransformationMatrix3d {
+            attribute :>> source = pfcs;                      // [p]_PFCS = M·[p]_MCS
+        }
+    }
+    attribute dgscs : MillimetreFrame3d {
+        attribute :>> transformation : AffineTransformationMatrix3d {
+            attribute :>> source = mcs;                       // [p]_MCS = M·[p]_DGSCS
+        }
+    }
+    attribute dgslcs : MillimetreFrame3d {
+        attribute :>> transformation : AffineTransformationMatrix3d {
+            attribute :>> source = dgscs;                     // [p]_DGSCS = M·[p]_DGSLCS
+        }
+    }
+
+    //  静态安装段的矩阵绑定 (引用 dgsInstallCalibration)。
+    //  [M] 若工具对 `transformation == builder(...)` 整体等值比较因 source/target
+    //      参与而失败，请改为只绑定 rotationMatrix/translationVector 两个子特性。
+    assert constraint wire_mcs_transformation {
+        mcs.transformation == buildTransform_MCS_to_PFCS(
+            dgsInstallCalibration.alpha_install,
+            dgsInstallCalibration.Lopx, dgsInstallCalibration.Lopy, dgsInstallCalibration.Lopz)
+    }
+    assert constraint wire_dgscs_transformation {
+        dgscs.transformation == buildTransform_DGSCS_to_MCS(
+            dgsInstallCalibration.beta_install,
+            dgsInstallCalibration.Losx, dgsInstallCalibration.Losy, dgsInstallCalibration.Losz)
+    }
+    //  dgslcs.transformation 为实时量，绑定移至 DGS part (见下)。
+
+    // =================================================================
+    //  DGS part 内需同步修改的成员 (其余 part 内容保持 v4.3 不变)
+    //   —— 把这两个属性的类型与两条一致性约束替换进 part def 'Droplet Generator Stage'
+    // =================================================================
+    //  attribute currentTransform_DGSLCS_to_DGSCS : AffineTransformationMatrix3d;
+    //  attribute currentTransform_DGSLCS_to_PFCS  : AffineTransformationMatrix3d;
+    //
+    //  assert constraint transformConsistency_sl {
+    //      currentTransform_DGSLCS_to_DGSCS ==
+    //          buildTransform_DGSLCS_to_DGSCS(
+    //              commandedYaw, commandedPitch, commandedRoll,
+    //              commandedTx, commandedTy, commandedTz)
+    //  }
+    //  assert constraint transformConsistency_pl {
+    //      currentTransform_DGSLCS_to_PFCS ==
+    //          buildTransform_DGSLCS_to_PFCS(
+    //              commandedYaw, commandedPitch, commandedRoll,
+    //              commandedTx, commandedTy, commandedTz, installCalib)
+    //  }
+}

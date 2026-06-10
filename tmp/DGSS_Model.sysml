@@ -138,7 +138,6 @@ package DGSS_Model {
     attribute def MillimetreFrame3d :> ThreeDCoordinateFrame {
         attribute :>> mRefs = (millimetre, millimetre, millimetre);
         attribute :>> isOrthogonal = true;
-        attribute kind : FrameKind;
     }    
 
     // ---- 应用变换: [p]_source = M · [p]_target ----  [H]
@@ -492,24 +491,19 @@ package DGSS_Model {
     //  [M] frame↔矩阵的等值绑定语法请在工具中复核；若 == 整体比较因
     //      source/target 参与而失败，改为只绑 rotationMatrix/translationVector。
     // =================================================================
-    attribute mcs : MillimetreFrame3d {                         // 根参考系，无 transformation
-        attribute :>> kind = FrameKind::MCS_FRAME;
-    }
+    attribute mcs : MillimetreFrame3d;                        // 根参考系，无 transformation
 
     attribute pfcs : MillimetreFrame3d {
-        attribute :>> kind = FrameKind::PFCS_FRAME;
         attribute :>> transformation : AffineTransformationMatrix3d {
             attribute :>> source = mcs;                       // [p]_MCS = M·[p]_PFCS
         }
     }
     attribute dgscs : MillimetreFrame3d {
-        attribute :>> kind = FrameKind::DGSCS_FRAME;
         attribute :>> transformation : AffineTransformationMatrix3d {
             attribute :>> source = pfcs;                      // [p]_PFCS = M·[p]_DGSCS
         }
     }
     attribute dgslcs : MillimetreFrame3d {
-        attribute :>> kind = FrameKind::DGSLCS_FRAME;
         attribute :>> transformation : AffineTransformationMatrix3d {
             attribute :>> source = dgscs;                     // [p]_DGSCS = M·[p]_DGSLCS
         }
@@ -1075,7 +1069,7 @@ package DGSS_Model {
         attribute aperture          : TCApertureGeometry;
         attribute idealCollectionPosition: Position3D;
         port inletPort              : DropletInletPort;
-        attribute hasCollected      : Boolean := false;     // ★ FIX④: 运行期可变状态用初值 `:=`
+        attribute hasCollected      : Boolean = false;
     }
 
     part def <FDS> 'Fine Detection System' {
@@ -1193,21 +1187,15 @@ package DGSS_Model {
 
         // ---- 当前运行状态 (供外部观察) ----
         attribute currentState : DGSSOperatingState;
-        // ★ FIX④ (修正 FIX③ 回归): 以下三个量在运行期被 assign 改写, 故必须用
-        //   初值 `:=` 声明. v5.1 误用绑定 `=` —— FeatureValue 绑定是贯穿生命周期
-        //   的等值约束, 声明语义下 uncollectableDetected 被钉死为 false, 导致
-        //   faultFlag(= uncollectableDetected) 恒假, Fault 再次不可达.
-        // 不可收集检测锁存. 初值 false; 运行态由 do 动作内的事件驱动循环置位
-        //   (见 monitorStability/trackReference), Fault 复位时由 faultToInit 的
-        //   do 动作清零. 置位语义: pointInsideTCAperture(...)==false ∨ TC-miss≥N ∨
+        // ★ FIX③ (闭合 TODO(D7)): 不可收集检测锁存. 初值 false; 运行态由 do 动作置位 (见 monitorStability/trackReference),
+        //   Fault 复位时由 faultToInit 的 effect 清零. 置位语义: pointInsideTCAperture(...)==false ∨ TC-miss≥N ∨
         //   FDS-loss ∨ 超行程, 这些条件经 FDS/几何判定汇入 lastDropletMissedTC.
-        attribute uncollectableDetected : Boolean := false;
-        // FDS/几何判定输出 — 最近一颗液滴 TC 穿越点是否落在开口外 (外部检测输入信号).
-        attribute lastDropletMissedTC : Boolean := false;
-        // 操作员手动复位指令 (外部输入; 见 Safety-1 应对措施第 7 步). 触发 Fault→Initialization 并清锁存.
-        attribute resetCommand : Boolean := false;
-        // ★ D4: faultFlag 绑定到检测锁存. 此处保留绑定 `=` —— faultFlag 是纯派生
-        //   别名, 自身从不被 assign, 其值随 uncollectableDetected 变化.
+        attribute uncollectableDetected : Boolean = false;
+        // ★ FIX③: FDS/几何判定输出 — 最近一颗液滴 TC 穿越点是否落在开口外 (外部检测输入信号).
+        attribute lastDropletMissedTC : Boolean = false;
+        // ★ FIX③: 操作员手动复位指令 (外部输入; 见 Safety-1 应对措施第 7 步). 触发 Fault→Initialization 并清锁存.
+        attribute resetCommand : Boolean = false;
+        // ★ D4: faultFlag 绑定到检测锁存 (原 `= false` 恒假 → 故障迁移永不可达).
         attribute faultFlag    : Boolean = uncollectableDetected;
 
         // ============================================================

@@ -1,4 +1,23 @@
 
+         * Version: 5.0  (基于 4.3)
+         * Author: Simon  (变换层优化 by 协作迭代)
+         * Date: 2026-06-08
+         * Change history (相对 v4.3):
+         *   1. 删除手搓 HomogeneousTransform / Vector4，统一改用标准库
+         *      MeasurementReferences::AffineTransformationMatrix3d
+         *      (自动补底行 (0,0,0,1)；分解 rotationMatrix:Real[9] + translationVector)。
+         *   2. 旋转矩阵 row-major (库 elements 派生式钉死)；语义 [p]_source = M·[p]_target。
+         *   3. buildTransform_DGSLCS_to_DGSCS：角度先 /(1[radian]) 消量纲再喂 sin/cos；
+         *      R = Rz(α)·Ry(β)·Rx(γ) 采用验证过的正确符号。
+         *   4. 原为注释桩的所有 buildTransform_* / applyTransform / compose / invert 全部实现。
+         *   5. 四坐标系升级为 ThreeDCoordinateFrame，按链 MCS(根)⊃PFCS⊃DGSCS⊃DGSLCS
+         *      用 transformation.source 固化安置关系 (target=that 由库保证)。
+         *   6. 新增 buildTransform_PFCS_to_MCS (R=Rx(α), T=L_op)，即 PFCS→MCS 树边。
+         *   7. 平移元素统一 /(1[mm])，与 MillimetreFrame3d 的 mRefs 对齐。
+         *   8. cos/sin 作用于 PlaneAngleValue 处统一加 /(1[radian]) 消量纲。
+         *
+         * 复核标注：[H] 高；[M] 需在 Syside/SymPy 复核 (4×4 展开/单位名/绑定语法)。
+         */
 
 
     doc /* Version: 4.3
@@ -39,4 +58,23 @@
          *                      - [意见3] DGSS 运行状态由 String 改为枚举 DGSSOperatingState,
          *                        并由状态机 entry 赋值驱动; Safety-1 约束同步改引枚举值.
          *                      - Fault 状态注释"承压超限" → "压差超限", 与新命名统一.
+         * Version: 5.0  (基于 4.3)
+         * Author: Simon  (变换层优化 by 协作迭代)
+         * Date: 2026-06-08
+         * Change history (相对 v4.3):
+         *   1. 删除手搓 HomogeneousTransform / Vector4，统一改用标准库
+         *      MeasurementReferences::AffineTransformationMatrix3d
+         *      (自动补底行 (0,0,0,1)；分解 rotationMatrix:Real[9] + translationVector)。
+         *   2. 旋转矩阵 row-major (库 elements 派生式钉死)；语义 [p]_source = M·[p]_target。
+         *   3. buildTransform_DGSLCS_to_DGSCS：角度先 /(1[radian]) 消量纲再喂 sin/cos；
+         *      R = Rz(α)·Ry(β)·Rx(γ) 采用验证过的正确符号。
+         *   4. 原为注释桩的所有 buildTransform_* / applyTransform / compose / invert 全部实现。
+         *   5. 四坐标系升级为 ThreeDCoordinateFrame，按链 MCS(根)⊃PFCS⊃DGSCS⊃DGSLCS
+         *      用 transformation.source 固化安置关系 (target=that 由库保证)。
+         *   6. 新增 buildTransform_PFCS_to_MCS (R=Rx(α), T=L_op)，即 PFCS→MCS 树边。
+         *   7. 平移元素统一 /(1[mm])，与 MillimetreFrame3d 的 mRefs 对齐。
+         *   8. cos/sin 作用于 PlaneAngleValue 处统一加 /(1[radian]) 消量纲。
+         *
+         * 复核标注：[H] 高；[M] 需在 Syside/SymPy 复核 (4×4 展开/单位名/绑定语法)。		 
+		 
          */
