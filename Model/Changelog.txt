@@ -1,4 +1,30 @@
 
+
+    doc /* Version: 5.2
+         * Author: Simon  (变换层优化 by 协作迭代)
+         * Date: 2026-06-10
+         * Change history (见 ChangeLog.txt). v5.2 修订摘要:
+         *   FIX④ [H] 运行期可变量由绑定 `=` 改为初值 `:=` (uncollectableDetected /
+         *            lastDropletMissedTC / resetCommand / hasCollected),
+         *            消除 "绑定恒假 → faultFlag 恒假 → Fault 不可达" 的回归.
+         *   FIX⑤ [H] 仅含 if 守卫的迁移改为 accept when 变化触发
+         *            (源状态含无界 do 动作时, 守卫式完成迁移永无评估时机).
+         *   FIX⑥ [M] DGSS 状态机改为 exhibit state, 确保由 DGSS 实例履行.
+         *   FIX⑦ [M] DG.weight 由非法重定义 `:>> ISQ::mass` 改为 `: MassValue`.
+         *   FIX⑧ [M] do 动作内的故障锁存由单次 assign 改为 loop + accept when
+         *            变化事件驱动, 实现真正的"持续锁存"语义.
+         *   FIX⑨ [M] Req-1..6 / Req-FDS-1 提升至包级, 约束统一经 subject 引用,
+         *            并在 DGSS 中以 satisfy 建立需求-主体绑定与追溯.
+         *   FIX⑩ [M] translationConsistency 由精确 `==` 改为 0.1 µm 容差形式
+         *            (标定字面量第 6 位小数存在 ~0.6 nm 舍入, 精确相等会判 false).
+         *   其余: pointInsideTCAperture / getIdealHitLocalZ 落地为可求值表达式并
+         *         提升至包级; 液滴/指令交互由裸 connect 升级为 flow; use case 中
+         *         doc 移入对应 action 体内 (原挂错宿主); 删除冗余 `== true`;
+         *         micrometer → micrometre 拼写统一; 修正两处复制错误注释.
+         */
+
+
+
          * Version: 5.0  (基于 4.3)
          * Author: Simon  (变换层优化 by 协作迭代)
          * Date: 2026-06-08

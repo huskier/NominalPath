@@ -1,0 +1,33 @@
+
+
+
+
+启动postgre
+docker run --name sysml2-postgres -p 5432:5432 -e POSTGRES_PASSWORD=mysecretpassword -e POSTGRES_DB=sysml2 -d postgres:16-alpine
+
+启动eclipsesyson/syson:latest
+docker run -d --name syson-app `
+  -p 8080:8080 `
+  -e SPRING_DATASOURCE_URL=jdbc:postgresql://host.docker.internal:5432/sysml2 `
+  -e SPRING_DATASOURCE_USERNAME=postgres `
+  -e SPRING_DATASOURCE_PASSWORD=mysecretpassword `
+  eclipsesyson/syson:latest
+  
+
+
+# 1. 临时扭转当前窗口的视线，指向刚装好的 JDK 11（注意核对你的具体文件夹名称）
+$env:JAVA_HOME="C:\Program Files\Eclipse Adoptium\jdk-11.0.31.11-hotspot"
+$env:Path="$env:JAVA_HOME\bin;" + $env:Path
+
+# 2. 验证当前窗口是否成功被骗过
+java -version
+
+sbt run
+
+
+localhost:9000/docs/
+
+
+
+$env:JAVA_HOME="C:\Program Files\Eclipse Adoptium\jdk-21.0.9.10-hotspot"
+$env:Path="$env:JAVA_HOME\bin;" + $env:Path
