@@ -1,8 +1,8 @@
 package DGSS_Model {
 
-    doc /* Version: 5.2
+    doc /* Version: 5.2.X
          * Author: Simon
-         * Date: 2026-06-10
+         * Date: 2026-07-14
          * Change history (见 ChangeLog.txt).
          */
 
@@ -80,6 +80,34 @@ package DGSS_Model {
         attribute coordinateFrame : FrameKind;
     }
 
+    attribute def Direction3DInFrame :> Direction3D {
+        attribute coordinateFrame : FrameKind;
+
+        assert constraint unitDirection {
+            NumericalFunctions::abs(
+                dx*dx + dy*dy + dz*dz - 1.0
+            ) <= 1.0e-12
+        }
+    }
+
+    attribute def Velocity3DInFrame {
+        attribute vx : SpeedValue;
+        attribute vy : SpeedValue;
+        attribute vz : SpeedValue;
+        attribute coordinateFrame : FrameKind;
+    }
+
+    attribute def Acceleration3DInFrame {
+        attribute ax : AccelerationValue;
+        attribute ay : AccelerationValue;
+        attribute az : AccelerationValue;
+        attribute coordinateFrame : FrameKind;
+    }
+
+    attribute def Pose6DOFInFrame :> Pose6DOF {
+        attribute coordinateFrame : FrameKind;
+    }    
+
     // ============================================================
     // 位移向量基础定义 (附录 "位置/位移向量定义")
     //
@@ -102,18 +130,18 @@ package DGSS_Model {
     }
 
     // ---- 构造: 由起点 O 与终点 P 的位置求位移向量 L = P - O ----
-calc def displacementVector {
-    in originPoint : Position3D;
-    in targetPoint : Position3D;
-    in theframe       : FrameKind;
-    
-    return result : DisplacementVector {
-        attribute :>> x = targetPoint.x - originPoint.x;
-        attribute :>> y = targetPoint.y - originPoint.y;
-        attribute :>> z = targetPoint.z - originPoint.z;
-        attribute :>> coordinateFrame = theframe;
+    calc def displacementVector {
+        in originPoint : Position3D;
+        in targetPoint : Position3D;
+        in theframe       : FrameKind;
+        
+        return result : DisplacementVector {
+            attribute :>> x = targetPoint.x - originPoint.x;
+            attribute :>> y = targetPoint.y - originPoint.y;
+            attribute :>> z = targetPoint.z - originPoint.z;
+            attribute :>> coordinateFrame = theframe;
+        }
     }
-}
 
     // ============================================================
     // 角度正方向约定 (附录 "坐标系旋转方向规定")
@@ -130,7 +158,37 @@ calc def displacementVector {
             "Right-hand rule: thumb along +axis, curled fingers give positive angle direction.";
     }
 
-    attribute globalRotationConvention : RotationSignConvention;    
+    attribute globalRotationConvention : RotationSignConvention;
+
+    calc def transformDirection {
+        in M : AffineTransformationMatrix3d;
+        in d : Direction3DInFrame;
+        in sourceFrame : FrameKind;
+        in targetFrame : FrameKind;
+
+        assert constraint inputFrameMatch {
+            d.coordinateFrame == targetFrame
+        }
+
+        return result : Direction3DInFrame {
+            attribute :>> dx =
+                M.rotationMatrix.elements#(1)*d.dx +
+                M.rotationMatrix.elements#(2)*d.dy +
+                M.rotationMatrix.elements#(3)*d.dz;
+
+            attribute :>> dy =
+                M.rotationMatrix.elements#(4)*d.dx +
+                M.rotationMatrix.elements#(5)*d.dy +
+                M.rotationMatrix.elements#(6)*d.dz;
+
+            attribute :>> dz =
+                M.rotationMatrix.elements#(7)*d.dx +
+                M.rotationMatrix.elements#(8)*d.dy +
+                M.rotationMatrix.elements#(9)*d.dz;
+
+            attribute :>> coordinateFrame = sourceFrame;
+        }
+    }  
 
     // =================================================================
     //  坐标系类型: 三轴单位均为 mm 的 3D 正交坐标系
@@ -170,10 +228,45 @@ calc def displacementVector {
         }
     }
 
+    // 带坐标系标签的位置变换
+    calc def applyTransformInFrame {
+        in M : AffineTransformationMatrix3d;
+        in p : Position3DInFrame;
+
+        // 输出点所在坐标系
+        in sourceFrame : FrameKind;
+
+        // 输入点所在坐标系
+        in targetFrame : FrameKind;
+
+        // 输入点必须确实在目标坐标系中表达
+        assert constraint inputFrameMatch {
+            p.coordinateFrame == targetFrame
+        }
+
+        // 复用已有的位置变换计算
+        private attribute transformedPosition : Position3D =
+            applyTransform(M, p);
+
+        return result : Position3DInFrame {
+            attribute :>> x = transformedPosition.x;
+            attribute :>> y = transformedPosition.y;
+            attribute :>> z = transformedPosition.z;
+
+            // 变换后的点在 sourceFrame 中表达
+            attribute :>> coordinateFrame = sourceFrame;
+        }
+    }   
+
     // ---- 复合: composeTransforms(T1, T2) = T1 · T2 (T1 外层) ----  [M] 复核索引
     calc def composeTransforms {
         in T1 : AffineTransformationMatrix3d;
         in T2 : AffineTransformationMatrix3d;
+
+        // 新增：只有中间端点相同才能复合
+        assert constraint composableEndpoints {
+            T1.target == T2.source
+        }        
 
         private attribute a11 : Real = T1.rotationMatrix.elements#(1);
         private attribute a12 : Real = T1.rotationMatrix.elements#(2);
@@ -202,6 +295,11 @@ calc def displacementVector {
         private attribute t2z : Real = T2.translationVector.elements#(3);
 
         return result : AffineTransformationMatrix3d {
+
+            // 新增：T1 · T2 的外部端点
+            attribute :>> source = T1.source;
+            attribute :>> target = T2.target;
+
             attribute :>> rotationMatrix {
                 attribute :>> elements = (
                     a11*b11+a12*b21+a13*b31,  a11*b12+a12*b22+a13*b32,  a11*b13+a12*b23+a13*b33,
@@ -235,6 +333,11 @@ calc def displacementVector {
         private attribute tz  : Real = T.translationVector.elements#(3);
 
         return result : AffineTransformationMatrix3d {
+
+            // 新增：逆变换交换源端和目标端
+            attribute :>> source = T.target;
+            attribute :>> target = T.source;
+
             attribute :>> rotationMatrix {
                 attribute :>> elements = (
                     r11, r21, r31,
@@ -490,55 +593,6 @@ calc def displacementVector {
     attribute dgsInstallCalibration : DGSInstallationCalibration;
 
     // =================================================================
-    //  四坐标系实例 + 安置关系 (新链: MCS 根)
-    //  [M] frame↔矩阵的等值绑定语法请在工具中复核；若 == 整体比较因
-    //      source/target 参与而失败，改为只绑 rotationMatrix/translationVector。
-    // =================================================================
-    attribute mcs : MillimetreFrame3d {                         // 根参考系，无 transformation
-        attribute :>> kind = FrameKind::MCS_FRAME;
-    }
-
-    attribute pfcs : MillimetreFrame3d {
-        attribute :>> kind = FrameKind::PFCS_FRAME;
-        attribute :>> transformation : AffineTransformationMatrix3d {
-            attribute :>> source = mcs;                       // [p]_MCS = M·[p]_PFCS
-        }
-    }
-    attribute dgscs : MillimetreFrame3d {
-        attribute :>> kind = FrameKind::DGSCS_FRAME;
-        attribute :>> transformation : AffineTransformationMatrix3d {
-            attribute :>> source = pfcs;                      // [p]_PFCS = M·[p]_DGSCS
-        }
-    }
-    attribute dgslcs : MillimetreFrame3d {
-        attribute :>> kind = FrameKind::DGSLCS_FRAME;
-        attribute :>> transformation : AffineTransformationMatrix3d {
-            attribute :>> source = dgscs;                     // [p]_DGSCS = M·[p]_DGSLCS
-        }
-    }
-
-    // ★ D6: 预构建矩阵 (只算一次), 供按元素比较——避免整体 == 把 source/target 卷入
-    private attribute pfcsXformBuilt : AffineTransformationMatrix3d =
-        buildTransform_PFCS_to_MCS(
-            dgsInstallCalibration.alpha_install,
-            dgsInstallCalibration.Lopx, dgsInstallCalibration.Lopy, dgsInstallCalibration.Lopz);
-    private attribute dgscsXformBuilt : AffineTransformationMatrix3d =
-        buildTransform_DGSCS_to_PFCS(
-            dgsInstallCalibration.alpha_install, dgsInstallCalibration.beta_install,
-            dgsInstallCalibration.Lopx, dgsInstallCalibration.Lopy, dgsInstallCalibration.Lopz,
-            dgsInstallCalibration.Losx, dgsInstallCalibration.Losy, dgsInstallCalibration.Losz);
-
-    
-    assert constraint wire_pfcs_transformation {     // ★ D6: 只比较 R/T 元素
-        pfcs.transformation.rotationMatrix.elements    == pfcsXformBuilt.rotationMatrix.elements and
-        pfcs.transformation.translationVector.elements == pfcsXformBuilt.translationVector.elements
-    }
-    assert constraint wire_dgscs_transformation {    // ★ D6
-        dgscs.transformation.rotationMatrix.elements    == dgscsXformBuilt.rotationMatrix.elements and
-        dgscs.transformation.translationVector.elements == dgscsXformBuilt.translationVector.elements
-    }
-
-    // =================================================================
     //  高层: DGSLCS → PFCS = compose(DGSCS_to_PFCS, DGSLCS_to_DGSCS)
     //   (需求在 PFCS 评估；PFCS→MCS 树边仅用于需要机器系坐标时)
     // =================================================================  [H 结构]
@@ -592,8 +646,7 @@ calc def displacementVector {
     }    
        
     item def SpatialReferencePoint {
-        attribute position : Position3D;
-        attribute coordinateFrame    : FrameKind default = FrameKind::PFCS_FRAME;
+        attribute position : Position3DInFrame;
     }
 
     item <PF> 'Primary Focus' : SpatialReferencePoint {
@@ -601,8 +654,8 @@ calc def displacementVector {
             :>> x = 0 [mm];
             :>> y = 0 [mm];
             :>> z = 0 [mm];
+            :>> coordinateFrame = FrameKind::PFCS_FRAME;
         }
-        :>> coordinateFrame = FrameKind::PFCS_FRAME;   // PF 是 PFCS 的原点
     }
     
     item monitorPosition : SpatialReferencePoint {
@@ -610,8 +663,8 @@ calc def displacementVector {
             :>> x = 5 [mm];
             :>> y = 0 [mm];
             :>> z = 0 [mm];
+            :>> coordinateFrame = FrameKind::PFCS_FRAME;
         }
-        :>> coordinateFrame = FrameKind::PFCS_FRAME;   // FDS 监测参考点, 在 PFCS 下定义
     }
     
     item nominalNozzlePosition : SpatialReferencePoint {
@@ -619,8 +672,8 @@ calc def displacementVector {
             :>> x = 410.453510 [mm];
             :>> y = 0 [mm];
             :>> z = 0 [mm];
+            :>> coordinateFrame = FrameKind::PFCS_FRAME;
         }
-        :>> coordinateFrame = FrameKind::PFCS_FRAME;   // 喷嘴出口标称位置, 在 PFCS 下定义
     }
 
     attribute def DropletStability {
@@ -663,7 +716,10 @@ calc def displacementVector {
     }    
        
     part def Nozzle {
-        attribute currentPose : Pose6DOF; 
+
+        attribute currentPose : Pose6DOFInFrame {
+            :>> coordinateFrame = FrameKind::PFCS_FRAME;
+        }
         attribute nominalDirection : Direction3D {
             :>> dx = -1.0;
             :>> dy =  0.0;
@@ -672,14 +728,38 @@ calc def displacementVector {
         attribute actualDirection : Direction3D;
         attribute directionDeviation : AngularDeviation;
         attribute positionDeviation : Position3D;
+       
+        attribute outletPositionInDGSLCS : Position3DInFrame {
+            :>> coordinateFrame = FrameKind::DGSLCS_FRAME;
+        }
 
-        // ----  喷嘴在 DGSLCS 下的标称几何 ----
-        //   (相对于 DGS 本地系的固定安装关系, 与 DGS 命令无关)
-        attribute outletPositionInDGSLCS  : Position3D;
-        attribute outletDirectionInDGSLCS : Direction3D;
+        attribute outletDirectionInDGSLCS : Direction3DInFrame {
+            :>> coordinateFrame = FrameKind::DGSLCS_FRAME;
+        }
 
-        // 喷嘴出口在 PFCS 下的实时位置 (由 DGS 当前变换映射)
-        attribute outletPositionInPFCS    : Position3D;        
+        attribute outletPositionInPFCS : Position3DInFrame {
+            :>> coordinateFrame = FrameKind::PFCS_FRAME;
+        }
+
+        attribute outletDirectionInPFCS : Direction3DInFrame {
+            :>> coordinateFrame = FrameKind::PFCS_FRAME;
+        }
+        
+        assert constraint nozzleFrameLabels {
+            outletPositionInDGSLCS.coordinateFrame ==
+                FrameKind::DGSLCS_FRAME
+            and
+            outletDirectionInDGSLCS.coordinateFrame ==
+                FrameKind::DGSLCS_FRAME
+            and
+            outletPositionInPFCS.coordinateFrame ==
+                FrameKind::PFCS_FRAME
+            and
+            outletDirectionInPFCS.coordinateFrame ==
+                FrameKind::PFCS_FRAME
+        }
+        
+      
         
         port outletPort : DropletOutletPort;
         port mountingPort : MechanicalMountPort;
@@ -739,9 +819,16 @@ calc def displacementVector {
         // ---- 坐标系标定与当前变换 ----
         ref attribute installCalib = dgsInstallCalibration;
 
+        attribute commandedTransform_DGSLCS_to_DGSCS: AffineTransformationMatrix3d;
+        attribute commandedTransform_DGSLCS_to_PFCS: AffineTransformationMatrix3d;        
+
         // 当前变换 (v5.0: 改用 AffineTransformationMatrix3d)
-        attribute currentTransform_DGSLCS_to_DGSCS : AffineTransformationMatrix3d;
-        attribute currentTransform_DGSLCS_to_PFCS  : AffineTransformationMatrix3d;
+        //attribute currentTransform_DGSLCS_to_DGSCS : AffineTransformationMatrix3d;
+        //attribute currentTransform_DGSLCS_to_PFCS  : AffineTransformationMatrix3d;
+
+        ref attribute currentTransform_DGSLCS_to_DGSCS  = commandedTransform_DGSLCS_to_DGSCS;
+        ref attribute currentTransform_DGSLCS_to_PFCS  = commandedTransform_DGSLCS_to_PFCS;        
+
 
         // 预构建当前命令位姿对应的矩阵 (只算一次)
         private attribute slXformBuilt : AffineTransformationMatrix3d =
@@ -766,6 +853,13 @@ calc def displacementVector {
         
         port controlPort : ControlSignalPort;
         port loadPort    : MechanicalMountPort;
+
+        bind commandedTx    = controlPort.command.tx;
+        bind commandedTy    = controlPort.command.ty;
+        bind commandedTz    = controlPort.command.tz;
+        bind commandedRoll  = controlPort.command.roll;
+        bind commandedPitch = controlPort.command.pitch;
+        bind commandedYaw   = controlPort.command.yaw;        
         
         // ============================================================
         // 运动学可达性占位声明
@@ -955,8 +1049,9 @@ calc def displacementVector {
              *   - 名义部分: P(t) = P0 + V0·t + 0.5·g·t²
              *   - 扰动部分: 由气流引入的随机偏移 ΔP(t)
              *   实际轨迹点 = 名义轨迹点 + 扰动 */
-        attribute startPoint     : Position3D;
-        attribute initialVelocity: ThreeVectorValue;
+        attribute startPoint      : Position3DInFrame;
+        attribute initialVelocity : Velocity3DInFrame;
+        attribute acceleration    : Acceleration3DInFrame;        
         attribute env            : EnvironmentCondition;
         
         // 在任意 x 平面处的名义穿越点 (运动学解析)
@@ -1001,10 +1096,11 @@ calc def displacementVector {
              *   开口所在平面默认为 YZ 平面.
              *   Y 为水平方向, Z 为竖直方向 (与重力方向 -Z 一致). */
         attribute openingPlane           : String       = "YZ-plane at TC";
-        attribute centerPosition         : Position3D{
+        attribute centerPosition         : Position3DInFrame{
                 :>> x = -310.0930 [mm];
                 :>> y = 0 [mm];
-                :>> z = 5.9873 [mm];          
+                :>> z = 5.9873 [mm]; 
+                :>> coordinateFrame = FrameKind::PFCS_FRAME;                        
         }
         attribute upperSemicircleRadius  : LengthValue  = 33      [mm];
         attribute lowerRectangleWidth    : LengthValue  = 66      [mm];
@@ -1124,11 +1220,15 @@ calc def displacementVector {
 
         // 由 FDS 实时输出的液滴稳定性测量结果
         attribute measuredStability : DropletStability;
+        
+        attribute requestedDGSCommand : DGSCommand;
 
         port feedbackPort : ~ControlSignalPort;
         // [设计注记] ~ControlSignalPort 意味着 FDS 直接输出 DGSCommand, 即控制律
         //   内嵌于 FDS. 若实际架构中控制器位于 DGS 侧, 建议 FDS 改为输出测量量
         //   (DropletStability), 由 DGS 内部 calc 生成命令. 留待 v6 架构决策.
+
+        bind feedbackPort.command = requestedDGSCommand;
     }    
 
     // ---- Req-FDS-1: FDS 空间测量分辨率需求 (包级, ★ FIX⑨) ----
@@ -1184,14 +1284,95 @@ calc def displacementVector {
             }
         }
 
+        // =================================================================
+        //  四坐标系实例 + 安置关系 (新链: MCS 根)
+        //  [M] frame↔矩阵的等值绑定语法请在工具中复核；若 == 整体比较因
+        //      source/target 参与而失败，改为只绑 rotationMatrix/translationVector。
+        // =================================================================
+        attribute mcs : MillimetreFrame3d {                         // 根参考系，无 transformation
+            attribute :>> kind = FrameKind::MCS_FRAME;
+        }
+
+        attribute pfcs : MillimetreFrame3d {
+            attribute :>> kind = FrameKind::PFCS_FRAME;
+            attribute :>> transformation : AffineTransformationMatrix3d {
+                attribute :>> source = mcs;                       // [p]_MCS = M·[p]_PFCS
+            }
+        }
+        attribute dgscs : MillimetreFrame3d {
+            attribute :>> kind = FrameKind::DGSCS_FRAME;
+            attribute :>> transformation : AffineTransformationMatrix3d {
+                attribute :>> source = pfcs;                      // [p]_PFCS = M·[p]_DGSCS
+            }
+        }
+        attribute dgslcs : MillimetreFrame3d {
+            attribute :>> kind = FrameKind::DGSLCS_FRAME;
+            attribute :>> transformation : AffineTransformationMatrix3d {
+                attribute :>> source = dgscs;                     // [p]_DGSCS = M·[p]_DGSLCS
+            }
+        }
+
+        // ★ D6: 预构建矩阵 (只算一次), 供按元素比较——避免整体 == 把 source/target 卷入
+        private attribute pfcsXformBuilt : AffineTransformationMatrix3d =
+            buildTransform_PFCS_to_MCS(
+                dgsInstallCalibration.alpha_install,
+                dgsInstallCalibration.Lopx, dgsInstallCalibration.Lopy, dgsInstallCalibration.Lopz);
+        private attribute dgscsXformBuilt : AffineTransformationMatrix3d =
+            buildTransform_DGSCS_to_PFCS(
+                dgsInstallCalibration.alpha_install, dgsInstallCalibration.beta_install,
+                dgsInstallCalibration.Lopx, dgsInstallCalibration.Lopy, dgsInstallCalibration.Lopz,
+                dgsInstallCalibration.Losx, dgsInstallCalibration.Losy, dgsInstallCalibration.Losz);
+
+        
+        assert constraint wire_pfcs_transformation {     // ★ D6: 只比较 R/T 元素
+            pfcs.transformation.rotationMatrix.elements    == pfcsXformBuilt.rotationMatrix.elements and
+            pfcs.transformation.translationVector.elements == pfcsXformBuilt.translationVector.elements
+        }
+        assert constraint wire_dgscs_transformation {    // ★ D6
+            dgscs.transformation.rotationMatrix.elements    == dgscsXformBuilt.rotationMatrix.elements and
+            dgscs.transformation.translationVector.elements == dgscsXformBuilt.translationVector.elements
+        }        
+               
+        assert constraint wire_dgslcs_realtime {
+            dgslcs.transformation.rotationMatrix.elements ==
+                dgs.currentTransform_DGSLCS_to_DGSCS.rotationMatrix.elements
+            and
+            dgslcs.transformation.translationVector.elements ==
+                dgs.currentTransform_DGSLCS_to_DGSCS.translationVector.elements
+            and
+            dgs.currentTransform_DGSLCS_to_DGSCS.source == dgscs
+            and
+            dgs.currentTransform_DGSLCS_to_DGSCS.target == dgslcs
+        }
+        
+        assert constraint wire_dgs_pl_endpoints {
+            dgs.currentTransform_DGSLCS_to_PFCS.source == pfcs
+            and
+            dgs.currentTransform_DGSLCS_to_PFCS.target == dgslcs
+        }        
+
         // ★ v3 新增: 喷嘴出口在 PFCS 下的实时位置 = T_pl · 喷嘴出口在 DGSLCS 下的位置
+        // 喷嘴出口在 PFCS 下的实时位置
+        // [P]_PFCS = T_pl · [P]_DGSLCS
         assert constraint nozzleOutletInPFCSConsistency {
             nozzle.outletPositionInPFCS ==
-                applyTransform(
+                applyTransformInFrame(
                     dgs.currentTransform_DGSLCS_to_PFCS,
-                    nozzle.outletPositionInDGSLCS
+                    nozzle.outletPositionInDGSLCS,
+                    FrameKind::PFCS_FRAME,
+                    FrameKind::DGSLCS_FRAME
                 )
         }
+
+        assert constraint nozzleOutletDirectionInPFCSConsistency {
+            nozzle.outletDirectionInPFCS ==
+                transformDirection(
+                    dgs.currentTransform_DGSLCS_to_PFCS,
+                    nozzle.outletDirectionInDGSLCS,
+                    FrameKind::PFCS_FRAME,
+                    FrameKind::DGSLCS_FRAME
+                )
+        }        
         
         // ============================================================
         // ★ D3 / FIX: 端口互连. 物项交换 (液滴/指令) 升级为 flow,
@@ -1384,11 +1565,16 @@ calc def displacementVector {
     }    
        
     action def GenerateDroplet {
+
         in nozzle : Nozzle;
+
         out droplet : Droplet {
-            attribute :>> generationPosition = nozzle.currentPose.position;
-            attribute :>> velocityDirection  = nozzle.actualDirection;
-        }
+            attribute :>> generationPosition =
+                nozzle.outletPositionInPFCS;
+
+            attribute :>> velocityDirection =
+                nozzle.outletDirectionInPFCS;
+        }        
     }
     
     action def PropagateDroplet {
@@ -1608,18 +1794,17 @@ calc def displacementVector {
         subject system : DGSS;
 
         objective {
-            doc /* 由 PFCS 中给定目标点反解 DGS 6-DOF 命令.
-                 *
-                 *   正向链:
-                 *     P_p = T_ps(α=28°, β=78°, L_ps) · T_sl(α_cmd, β_cmd, γ_cmd; tx, ty, tz) · P_l
-                 *
-                 *   反解流程 (利用 invertTransform):
-                 *     1) 已知 P_p (PF 系目标) 与 P_l (喷嘴出口在 DGSLCS 下的固定位置)
-                 *     2) 求 T_sl 使得  T_ps · T_sl · P_l = P_p
-                 *     3) 从 T_sl 提取 (α, β, γ, tx, ty, tz) 作为 DGS 命令
-                 *     4) 验证落在 DGS 行程极限内 (singleAxisTravelLimits) 且
-                 *        在耦合工作空间内 (coupledWorkspaceReachability)
-                 */
+            doc /*
+                * [DEFERRED]
+                * 当前仅给定 PFCS 中的目标点，数学上不足以唯一确定
+                * DGS 的 6-DOF 命令。
+                *
+                * 完整实现需要：
+                * 1. 喷嘴出口完整目标位姿；
+                * 2. 喷嘴相对 DGSLCS 的固定安装位姿；
+                * 3. ZYX 欧拉角反解；
+                * 4. 正向回代与可达性验证。
+                */
         }
 
         first start;
